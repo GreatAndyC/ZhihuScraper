@@ -128,6 +128,56 @@ QUESTION_BATCH_SIZE=50
 
 完整可选配置见 [.env.example](./.env.example)。
 
+## 🍪 Cookie 获取步骤
+
+很多知乎接口需要登录态，否则容易出现 `403`。  
+推荐直接从浏览器开发者工具里复制完整 Cookie。
+
+### 方式一：Chrome / Edge / Arc
+
+1. 打开 [https://www.zhihu.com](https://www.zhihu.com) 并确认已经登录
+2. 按 `F12` 打开开发者工具
+3. 切换到 `Network` 面板
+4. 刷新当前页面
+5. 在请求列表里随便点开一个 `zhihu.com` 的请求
+6. 在右侧找到 `Request Headers`
+7. 找到 `Cookie` 字段
+8. 复制整段 Cookie，粘贴到 `.env` 里的：
+
+```env
+ZHIHU_COOKIE=这里粘贴完整Cookie
+```
+
+注意：
+- 必须是一整行，不要手动换行
+- 不要只复制某一个 cookie 项，要复制完整 `Cookie` 请求头内容
+- Cookie 过期后需要重新登录知乎并重新复制
+
+### 方式二：Safari
+
+1. 打开 Safari 设置，启用“开发”菜单
+2. 登录知乎后打开任意知乎页面
+3. 点击顶部“开发”菜单，打开网页检查器
+4. 在 `网络` 面板刷新页面
+5. 选择任意知乎请求
+6. 在请求头里找到 `Cookie`
+7. 复制完整内容到 `.env`
+
+### 常见问题
+
+**1. 明明填了 Cookie，还是 403**
+- 先确认 Cookie 是完整复制的
+- 先确认知乎当前账号仍处于登录状态
+- 如果刚登录过久，重新复制一遍最新 Cookie
+
+**2. 可以把 Cookie 提交到 GitHub 吗**
+- 不可以
+- `.env` 已经默认被 `.gitignore` 忽略，不要把真实 Cookie 上传到公开仓库
+
+**3. GUI 会自动读取 `.env` 吗**
+- 会
+- 直接在项目根目录放置 `.env` 后，启动 `gui.py` 就会自动读取
+
 ## 🚀 快速开始
 
 ### 方式一：GUI（推荐）
