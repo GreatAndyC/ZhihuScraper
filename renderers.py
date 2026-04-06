@@ -155,6 +155,15 @@ def _page_script(enable_type_filter: bool) -> str:
     if (sortSelect) sortSelect.addEventListener('change', applyView);
 {filter_listener}
     applyView();
+
+    // 恢复被懒加载机制隐藏的图片
+    document.querySelectorAll('img.lazy').forEach(img => {{
+      if (img.dataset.actualsrc) {{
+        img.src = img.dataset.actualsrc;
+      }} else if (img.dataset.original) {{
+        img.src = img.dataset.original;
+      }}
+    }});
   </script>
 """
 
