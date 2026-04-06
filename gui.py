@@ -37,6 +37,7 @@ from storage import (
     find_existing_user_json,
     load_question,
     load_user,
+    merge_user_by_content_types,
 )
 from scraper.base import USER_AGENTS
 
@@ -1096,6 +1097,25 @@ def _scrape_user(
             except Exception as exc:
                 add_log(f"⚠ 检查本地用户归档失败，继续抓取: {exc}")
 
+    existing_user = None
+    if force:
+        existing_json = find_existing_user_json(user_id)
+        if existing_json:
+            try:
+                existing_user = load_user(existing_json)
+                preserved_types = [
+                    item for item in (existing_user.content_types or [])
+                    if item not in set(content_types or [])
+                ]
+                if preserved_types:
+                    add_log(
+                        "✓ 强制重抓将仅替换所选类型，保留本地其他类型内容: "
+                        + ", ".join(preserved_types)
+                    )
+            except Exception as exc:
+                add_log(f"⚠ 读取本地用户归档失败，本次将按整份结果覆盖保存: {exc}")
+                existing_user = None
+
     scraper = None
     try:
         scraper = UserScraper(conservative_mode=conservative_mode)
@@ -1120,6 +1140,12 @@ def _scrape_user(
         add_log(f"✓ 已抓内容：{len(u.activities)} 条")
         rich_count = sum(1 for item in u.activities if item.content_html)
         add_log(f"✓ 正文补全：成功 {rich_count} 条，失败 {len(u.activities) - rich_count} 条")
+        if existing_user and content_types:
+            u = merge_user_by_content_types(existing_user, u, content_types)
+            add_log(
+                "✓ 已按所选类型合并本地旧归档，当前保留内容类型: "
+                + ", ".join(u.content_types or content_types)
+            )
         html_path = render_user_html(
             u,
             conservative_mode=conservative_mode,

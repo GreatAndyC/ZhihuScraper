@@ -26,6 +26,10 @@ def test_render_question_html_text_mode_contains_sort_controls(tmp_path, monkeyp
 
     assert path.endswith(".html")
     assert "sort-select" in html
+    assert 'search-input' in html
+    assert 'data-search="' in html
+    assert "打开原回答" in html
+    assert "https://www.zhihu.com/question/2009611085918013365/answer/1" in html
     assert "第一条回答" in html
     assert "普通人要 OpenClaw 有什么用？" in html
     assert "https://www.zhihu.com/question/2009611085918013365" in html
@@ -54,6 +58,7 @@ def test_render_user_html_single_mode_uses_single_suffix_and_type_filter(tmp_pat
                 id="101",
                 type="answer",
                 title="回答标题",
+                target_id="2020954059209803141",
                 excerpt="摘要",
                 content_html='<p>正文<img src="https://example.com/a.png" /></p>',
             )
@@ -65,7 +70,12 @@ def test_render_user_html_single_mode_uses_single_suffix_and_type_filter(tmp_pat
 
     assert path.endswith("-single.html")
     assert "type-filter" in html
+    assert 'search-input' in html
+    assert 'data-search="' in html
     assert "data:image/png;base64" in html
+    assert "pin-reference-title" in html
+    assert "打开原回答" in html
+    assert 'https://www.zhihu.com/question/2020954059209803141/answer/101' in html
     assert "回答标题" in html
     assert "https://www.zhihu.com/people/ming--li" in html
 

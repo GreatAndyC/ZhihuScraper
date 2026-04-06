@@ -132,6 +132,7 @@ def _page_script(enable_type_filter: bool) -> str:
   <script>
     const list = document.getElementById('item-list');
     const sortSelect = document.getElementById('sort-select');
+    const searchInput = document.getElementById('search-input');
 
     function sortItems(items, mode) {{
       items.sort((a, b) => {{
@@ -152,18 +153,23 @@ def _page_script(enable_type_filter: bool) -> str:
     function applyView() {{
       if (!list || !sortSelect) return;
 {filter_block}
+      const keyword = (searchInput ? searchInput.value : '').trim().toLowerCase();
       const mode = sortSelect.value;
       const items = Array.from(list.querySelectorAll('.item-card'));
       const ordered = sortItems(items, mode);
       ordered.forEach((item) => {{
         const itemType = item.dataset.type || 'answer';
-        const visible = selectedType === 'all' || selectedType === itemType;
+        const searchText = (item.dataset.search || '').toLowerCase();
+        const matchesType = selectedType === 'all' || selectedType === itemType;
+        const matchesKeyword = !keyword || searchText.includes(keyword);
+        const visible = matchesType && matchesKeyword;
         item.style.display = visible ? '' : 'none';
         list.appendChild(item);
       }});
     }}
 
     if (sortSelect) sortSelect.addEventListener('change', applyView);
+    if (searchInput) searchInput.addEventListener('input', applyView);
 {filter_listener}
     applyView();
 
@@ -337,6 +343,20 @@ def _html_shell(
       min-width: 180px;
       outline: none;
     }}
+    .toolbar input[type="search"] {{
+      border: 1px solid var(--zh-line);
+      background: #fff;
+      color: var(--zh-text);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      min-width: 240px;
+      outline: none;
+      flex: 1 1 260px;
+    }}
+    .toolbar input[type="search"]::placeholder {{
+      color: #8c8c8c;
+    }}
     .list {{
       display: flex;
       flex-direction: column;
@@ -415,6 +435,24 @@ def _html_shell(
       border-color: rgba(5, 109, 232, 0.16);
       font-weight: 600;
     }}
+    .action-link {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--zh-blue);
+      background: var(--zh-blue-soft);
+      border: 1px solid rgba(5, 109, 232, 0.16);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-weight: 600;
+      text-decoration: none;
+    }}
+    .action-link:hover {{
+      text-decoration: none;
+      filter: brightness(0.98);
+    }}
     .title-link {{
       color: var(--zh-text);
       font-size: 20px;
@@ -467,6 +505,43 @@ def _html_shell(
     }}
     .content blockquote p:last-child {{
       margin-bottom: 0;
+    }}
+    .content .pin-reference {{
+      margin-top: 18px;
+      padding: 18px 20px;
+      border-radius: 16px;
+      border: 1px solid #e7ebf0;
+      background: linear-gradient(180deg, #fafbfc 0%, #f5f7fa 100%);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+    }}
+    .content .pin-reference .pin-reference-kind {{
+      display: inline-block;
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--zh-blue);
+      background: var(--zh-blue-soft);
+      border-radius: 999px;
+      padding: 5px 10px;
+    }}
+    .content .pin-reference .pin-reference-title {{
+      display: block;
+      margin-bottom: 10px;
+      color: var(--zh-text);
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.45;
+      text-decoration: none;
+    }}
+    .content .pin-reference .pin-reference-title:hover {{
+      color: var(--zh-blue);
+      text-decoration: none;
+    }}
+    .content .pin-reference .pin-reference-summary {{
+      color: #6b7280;
+      font-size: 14px;
+      line-height: 1.7;
+      margin: 0;
     }}
     .text-only {{
       white-space: pre-wrap;
@@ -768,11 +843,13 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
         author_id = getattr(author, "id", "") or ""
         author_headline = getattr(author, "headline", "") or "未提供签名"
         author_link = f"https://www.zhihu.com/people/{author_id}" if author_id else "https://www.zhihu.com/"
+        answer_link = f"https://www.zhihu.com/question/{question.id}/answer/{answer.id}"
         avatar_url = localizer.localize_url(getattr(author, "avatar_url", "") or "", f"answer-{answer.id}-avatar")
         content_html = localizer.localize_html(answer.content, f"answer-{answer.id}")
+        search_blob = _search_blob(author_name, author_headline, answer.content_text, answer.excerpt)
         answer_cards.append(
             f"""
-        <article class="item-card" data-type="answer" data-index="{idx}" data-upvotes="{answer.upvote_count}" data-created="{_timestamp(answer.created_time)}">
+        <article class="item-card" data-type="answer" data-index="{idx}" data-upvotes="{answer.upvote_count}" data-created="{_timestamp(answer.created_time)}" data-search="{escape(search_blob)}">
           <div class="item-head">
             <div class="item-author">
               {_avatar_markup(avatar_url, author_name, _initial(author_name))}
@@ -786,6 +863,7 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
               <span>赞同 {answer.upvote_count}</span>
               <span>评论 {answer.comment_count}</span>
               <span>{_format_time(answer.created_time)}</span>
+              <a class="action-link" href="{escape(answer_link)}" target="_blank" rel="noreferrer">打开原回答</a>
             </div>
           </div>
           {_content_block(content_html, answer.content_text, getattr(question, "content_mode", "full"))}
@@ -824,6 +902,7 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
         <option value="upvotes-desc">按点赞倒序（最高）</option>
         <option value="upvotes-asc">按点赞正序（最低）</option>
       </select>
+      <input id="search-input" type="search" placeholder="搜索作者、签名、正文关键词" />
     </section>
     """
     with open(path, "w", encoding="utf-8") as f:
@@ -867,6 +946,12 @@ def _mode_label(kind: str) -> str:
     }.get(kind, kind)
 
 
+def _search_blob(*parts: str) -> str:
+    merged = " ".join((part or "").strip() for part in parts if part)
+    merged = re.sub(r"\s+", " ", merged)
+    return merged[:4000]
+
+
 def render_user_html(user, conservative_mode: bool = False, progress_callback=None, variant: str = "dir") -> str:
     html_dir = os.path.join(OUTPUT_DIR, "html", "users")
     os.makedirs(html_dir, exist_ok=True)
@@ -893,9 +978,11 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
     cards = []
     for idx, activity in enumerate(user.activities, start=1):
         content_html = localizer.localize_html(activity.content_html, f"{activity.type}-{activity.id}")
+        activity_link = _activity_link(activity)
+        search_blob = _search_blob(user.name, user.headline, activity.title, activity.excerpt, activity.id)
         cards.append(
             f"""
-        <article class="item-card" data-type="{escape(activity.type)}" data-index="{idx}" data-upvotes="{activity.upvote_count}" data-created="{_timestamp(activity.created_time)}">
+        <article class="item-card" data-type="{escape(activity.type)}" data-index="{idx}" data-upvotes="{activity.upvote_count}" data-created="{_timestamp(activity.created_time)}" data-search="{escape(search_blob)}">
           <div class="item-head">
             <div class="item-author">
               {_avatar_markup(hero_avatar, user.name or user.id, _initial(user.name or user.id))}
@@ -909,6 +996,7 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
               <span>赞同 {activity.upvote_count}</span>
               <span>评论 {activity.comment_count}</span>
               <span>ID {escape(activity.id)}</span>
+              <a class="action-link" href="{escape(activity_link)}" target="_blank" rel="noreferrer">打开原{escape(_type_label(activity.type))}</a>
             </div>
           </div>
           {_content_block(content_html, activity.excerpt, getattr(user, "content_mode", "full"))}
@@ -955,6 +1043,7 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
         <option value="upvotes-desc">按点赞倒序（最高）</option>
         <option value="upvotes-asc">按点赞正序（最低）</option>
       </select>
+      <input id="search-input" type="search" placeholder="搜索标题、摘要、正文关键词" />
     </section>
     """
 

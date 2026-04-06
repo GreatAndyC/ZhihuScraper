@@ -14,6 +14,7 @@ from storage import (
     find_existing_user_json,
     load_question,
     load_user,
+    merge_user_by_content_types,
     merge_question_batches,
     prepare_question_batch_dir,
     save_question,
@@ -110,6 +111,7 @@ def cmd_merge_question(args):
 def cmd_user(args):
     user_id = normalize_user_input(args.user_id)
     profile = "conservative" if args.conservative else args.profile
+    existing_user = None
     if not args.force:
         existing_json = find_existing_user_json(user_id)
         if existing_json:
@@ -128,6 +130,20 @@ def cmd_user(args):
                 if html_path:
                     print(f"浏览页: {html_path}")
                 return
+    else:
+        existing_json = find_existing_user_json(user_id)
+        if existing_json:
+            try:
+                existing_user = load_user(existing_json)
+                preserved_types = [
+                    item for item in (existing_user.content_types or [])
+                    if item not in set(args.types or [])
+                ]
+                if preserved_types:
+                    print("强制重抓将仅替换所选类型，保留本地其他类型内容: " + ", ".join(preserved_types))
+            except Exception as exc:
+                print(f"读取本地用户归档失败，本次将按整份结果覆盖保存: {exc}")
+                existing_user = None
     scraper = UserScraper(conservative_mode=profile == "conservative")
     print(f"抓取节奏: {'保守模式（更慢、更稳）' if profile == 'conservative' else ('快速模式（更快，可能不完整）' if profile == 'fast' else '标准模式')}")
     if user_id != args.user_id:
@@ -140,6 +156,9 @@ def cmd_user(args):
     if not user:
         print(f"无法获取用户 {user_id}", file=sys.stderr)
         sys.exit(1)
+    if existing_user and args.types:
+        user = merge_user_by_content_types(existing_user, user, args.types)
+        print("已按所选类型合并本地旧归档，当前保留内容类型: " + ", ".join(user.content_types or args.types))
     html_path = render_user_html(
         user,
         conservative_mode=profile == "conservative",

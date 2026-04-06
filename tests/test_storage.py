@@ -1,7 +1,14 @@
 import json
 
 from models import Activity, Question, User
-from storage import merge_question_batches, prepare_question_batch_dir, save_question, save_question_batch, save_user
+from storage import (
+    merge_question_batches,
+    merge_user_by_content_types,
+    prepare_question_batch_dir,
+    save_question,
+    save_question_batch,
+    save_user,
+)
 
 
 def test_save_question_uses_chinese_title_filename(tmp_path, monkeypatch):
@@ -58,3 +65,37 @@ def test_merge_question_batches_outputs_named_json(tmp_path, monkeypatch):
     payload = json.loads(open(path, encoding="utf-8").read())
     assert payload["answer_count"] == 2
     assert len(payload["answers"]) == 2
+
+
+def test_merge_user_by_content_types_preserves_unselected_types():
+    existing = User(
+        id="ming--li",
+        name="桑桑桑",
+        content_mode="full",
+        content_types=["answer", "article", "pin"],
+        answer_count=10,
+        articles_count=2,
+        activities=[
+            Activity(id="a1", type="answer", title="旧回答"),
+            Activity(id="art1", type="article", title="旧文章"),
+            Activity(id="pin1", type="pin", title="旧想法"),
+        ],
+    )
+    refreshed = User(
+        id="ming--li",
+        name="桑桑桑",
+        content_mode="full",
+        content_types=["pin"],
+        answer_count=0,
+        articles_count=0,
+        activities=[
+            Activity(id="pin2", type="pin", title="新想法"),
+        ],
+    )
+
+    merged = merge_user_by_content_types(existing, refreshed, ["pin"])
+
+    assert merged.content_types == ["answer", "article", "pin"]
+    assert merged.answer_count == 10
+    assert merged.articles_count == 2
+    assert [item.id for item in merged.activities] == ["a1", "art1", "pin2"]

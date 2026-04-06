@@ -5,7 +5,7 @@ from typing import Type, TypeVar, Generic, Optional
 
 from config import OUTPUT_DIR
 from export_utils import question_export_stem, user_export_stem
-from models import Question, User
+from models import Activity, Question, User
 
 T = TypeVar("T")
 
@@ -37,6 +37,53 @@ def save_user(user, user_id: str) -> str:
     path = os.path.join(OUTPUT_DIR, "users", f"{stem}.json")
     storage.save(user.model_dump(), path)
     return path
+
+
+def merge_user_by_content_types(existing_user: User, new_user: User, replace_types: list[str]) -> User:
+    replace_set = {item for item in (replace_types or []) if item}
+    if not replace_set:
+        return new_user
+
+    kept_existing = [activity for activity in (existing_user.activities or []) if activity.type not in replace_set]
+    replacing = [activity for activity in (new_user.activities or []) if activity.type in replace_set]
+    merged_activities = kept_existing + replacing
+    merged_activities.sort(
+        key=lambda item: item.created_time.timestamp() if getattr(item, "created_time", None) else 0,
+        reverse=True,
+    )
+
+    merged_types = []
+    for value in list(existing_user.content_types or []) + list(new_user.content_types or []):
+        if value and value not in merged_types:
+            merged_types.append(value)
+
+    merged_mode = _merged_content_mode(existing_user, new_user, merged_activities)
+
+    return User(
+        id=new_user.id or existing_user.id,
+        name=new_user.name or existing_user.name,
+        content_mode=merged_mode,
+        content_types=merged_types,
+        export_meta=dict(existing_user.export_meta or {}),
+        headline=new_user.headline or existing_user.headline,
+        avatar_url=new_user.avatar_url or existing_user.avatar_url,
+        followers_count=new_user.followers_count,
+        following_count=new_user.following_count,
+        answer_count=(new_user.answer_count if "answer" in replace_set else existing_user.answer_count),
+        articles_count=(new_user.articles_count if "article" in replace_set else existing_user.articles_count),
+        activities=merged_activities,
+    )
+
+
+def _merged_content_mode(existing_user: User, new_user: User, activities: list[Activity]) -> str:
+    if any((activity.content_html or "").strip() for activity in activities):
+        return "full"
+    modes = [getattr(existing_user, "content_mode", ""), getattr(new_user, "content_mode", "")]
+    if "text" in modes:
+        return "text"
+    if "fast" in modes:
+        return "fast"
+    return new_user.content_mode or existing_user.content_mode or "full"
 
 
 def get_question_batch_dir(question_id: str) -> str:

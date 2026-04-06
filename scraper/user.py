@@ -20,6 +20,11 @@ class UserScraper(BaseScraper):
     CONTENT_PAGE_SIZE = 20
     SUPPORTED_TYPES = ("answer", "article", "pin")
     DETAIL_403_FUSE_THRESHOLD = 3
+    DETAIL_API_FUSE_POLICIES = {
+        "answer": {"threshold": 3, "statuses": {403}, "status_text": "403"},
+        "article": {"threshold": 2, "statuses": {403, 404}, "status_text": "403/404"},
+        "pin": {"threshold": 2, "statuses": {403, 404}, "status_text": "403/404"},
+    }
 
     def fetch_all(
         self,
@@ -294,7 +299,7 @@ class UserScraper(BaseScraper):
         total = len(activities)
         success_count = 0
         detail_policy = {
-            kind: {"consecutive_403": 0, "bypass_api": False}
+            kind: {"consecutive_failures": 0, "bypass_api": False}
             for kind in self.SUPPORTED_TYPES
         }
 
@@ -312,19 +317,23 @@ class UserScraper(BaseScraper):
                 activity,
                 bypass_api=bool(policy.get("bypass_api")),
             )
-            if api_status == 403:
-                policy["consecutive_403"] = int(policy.get("consecutive_403", 0)) + 1
+            fuse_policy = self.DETAIL_API_FUSE_POLICIES.get(
+                activity.type,
+                {"threshold": self.DETAIL_403_FUSE_THRESHOLD, "statuses": {403}, "status_text": "403"},
+            )
+            if api_status in fuse_policy["statuses"]:
+                policy["consecutive_failures"] = int(policy.get("consecutive_failures", 0)) + 1
                 if (
                     not policy.get("bypass_api")
-                    and policy["consecutive_403"] >= self.DETAIL_403_FUSE_THRESHOLD
+                    and policy["consecutive_failures"] >= int(fuse_policy["threshold"])
                 ):
                     policy["bypass_api"] = True
                     logger.warning(
-                        f"{self._type_label(activity.type)}详情接口连续 {policy['consecutive_403']} 次 403，"
-                        f"后续同类型内容将直接走页面兜底，避免继续触发风控"
+                        f"{self._type_label(activity.type)}详情接口连续 {policy['consecutive_failures']} 次返回 "
+                        f"{fuse_policy['status_text']}，后续同类型内容将直接走页面兜底，避免重复请求无效接口"
                     )
             elif api_status is not None:
-                policy["consecutive_403"] = 0
+                policy["consecutive_failures"] = 0
             if detail:
                 activity = detail
             if activity.content_html:
@@ -490,6 +499,9 @@ class UserScraper(BaseScraper):
             page.goto(f"https://www.zhihu.com/pin/{activity.id}", timeout=30000)
             page.wait_for_timeout(1800)
             html = self._extract_rich_text_html(page)
+            page_reference = self._extract_pin_reference_from_page(page)
+            if page_reference:
+                html = self._append_pin_reference_html(html, {"page_reference": page_reference})
             text = self._html_to_text(html)
             if html:
                 logger.info(f"想法页面兜底成功: id={activity.id}")
@@ -507,6 +519,72 @@ class UserScraper(BaseScraper):
         except Exception as exc:
             logger.warning(f"想法页面兜底失败: id={activity.id}, error={exc}")
             return None
+
+    def _extract_pin_reference_from_page(self, page) -> Optional[dict]:
+        script = """
+() => {
+  const currentHref = window.location.href || '';
+  const hrefRe = /(zhihu\\.com\\/question\\/|zhuanlan\\.zhihu\\.com\\/p\\/|zhihu\\.com\\/pin\\/)/i;
+  const skipRe = /zhihu\\.com\\/people\\//i;
+  const anchors = Array.from(document.querySelectorAll('a[href]'));
+  for (const anchor of anchors) {
+    const href = anchor.href || '';
+    if (!hrefRe.test(href) || skipRe.test(href) || href === currentHref) continue;
+    const title = (anchor.innerText || anchor.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (title.length < 4) continue;
+    const card = anchor.closest('div, article, section, a') || anchor;
+    const summary = ((card.innerText || card.textContent || '').replace(/\\s+/g, ' ').trim());
+    return {
+      url: href,
+      title,
+      summary: summary && summary !== title ? summary.slice(0, 240) : '',
+      kind: '转发链接',
+    };
+  }
+  return null;
+}
+"""
+        try:
+            result = page.evaluate(script)
+            if isinstance(result, dict) and result.get("url"):
+                return result
+        except Exception:
+            pass
+
+        try:
+            html = page.content()
+        except Exception:
+            return None
+
+        normalized_html = html.replace("\\/", "/")
+        candidates = []
+        patterns = [
+            r"https://www\.zhihu\.com/question/\d+(?:/answer/\d+)?",
+            r"https://zhuanlan\.zhihu\.com/p/\d+",
+            r"https://www\.zhihu\.com/pin/\d+",
+            r"//www\\.zhihu\\.com/question/\\d+(?:/answer/\\d+)?",
+            r"//zhuanlan\\.zhihu\\.com/p/\\d+",
+            r"//www\\.zhihu\\.com/pin/\\d+",
+        ]
+        for pattern in patterns:
+            candidates.extend(__import__("re").findall(pattern, normalized_html))
+        normalized = []
+        for candidate in candidates:
+            url = candidate.replace("\\/", "/")
+            if url.startswith("//"):
+                url = f"https:{url}"
+            if "/people/" in url or url == page.url:
+                continue
+            if url not in normalized:
+                normalized.append(url)
+        if not normalized:
+            return None
+        return {
+            "url": normalized[0],
+            "title": "打开原始转发内容",
+            "summary": "",
+            "kind": "转发链接",
+        }
 
     def _extract_rich_text_html(self, page) -> str:
         selectors = [
@@ -786,6 +864,7 @@ async ({ path, params }) => {
             "shared_content",
             "shared_target",
             "share_target",
+            "page_reference",
         ):
             value = item.get(key)
             if value:
@@ -801,16 +880,16 @@ async ({ path, params }) => {
             kind = reference.get("kind") or "转发内容"
             pieces = [
                 '<blockquote class="pin-reference">',
-                f'<p><strong>{escape(kind)}</strong></p>',
+                f'<span class="pin-reference-kind">{escape(kind)}</span>',
             ]
             if url:
                 pieces.append(
-                    f'<p><a href="{escape(url)}" target="_blank" rel="noreferrer">{escape(title)}</a></p>'
+                    f'<a class="pin-reference-title" href="{escape(url)}" target="_blank" rel="noreferrer">{escape(title)}</a>'
                 )
             else:
-                pieces.append(f"<p>{escape(title)}</p>")
+                pieces.append(f'<span class="pin-reference-title">{escape(title)}</span>')
             if summary and summary != title:
-                pieces.append(f"<p>{escape(summary[:220])}</p>")
+                pieces.append(f'<p class="pin-reference-summary">{escape(summary[:220])}</p>')
             pieces.append("</blockquote>")
             return "".join(pieces)
         return ""
@@ -821,7 +900,7 @@ async ({ path, params }) => {
             return None
         url = cls._find_first_url(value)
         title = cls._find_first_named_text(value, ("title", "name", "question_text", "headline"))
-        summary = cls._find_first_named_text(value, ("excerpt", "description", "text", "content"))
+        summary = cls._find_first_named_text(value, ("summary", "excerpt", "description", "text", "content"))
         kind = cls._find_first_named_text(value, ("type", "target_type", "object_type"))
         if not any((url, title, summary)):
             return None
