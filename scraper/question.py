@@ -49,6 +49,17 @@ class QuestionScraper(BaseScraper):
                 f"问题 {question_id} API 未抓全: 当前 {len(question.answers)} 条, 声明总数 {question.answer_count} 条"
             )
 
+        if content_mode == "fast":
+            logger.warning(f"问题 {question_id} 快速模式尝试浏览器接口补抓，不再启用页面 DOM 兜底")
+            question = self._fetch_question_via_playwright_api(
+                question_id,
+                can_continue,
+                batch_callback,
+                content_mode,
+                existing_question=question,
+            )
+            return question
+
         logger.warning(f"问题 {question_id} 切换到 Playwright 浏览器接口抓取")
         question = self._fetch_question_via_playwright_api(
             question_id,
@@ -110,7 +121,7 @@ class QuestionScraper(BaseScraper):
             "content_mode": content_mode,
             "description": (
                 self._html_to_text(detail.get("detail") or detail.get("excerpt") or "")
-                if content_mode == "text"
+                if content_mode in {"text", "fast"}
                 else (detail.get("detail") or detail.get("excerpt") or "")
             ),
             "created_time": self._parse_timestamp(detail.get("created")),
@@ -120,7 +131,7 @@ class QuestionScraper(BaseScraper):
             "follower_count": int(detail.get("follower_count") or 0),
             "answers": [],
         }
-        self._log_question_plan(method="API 分页", title=title, total_answers=total_hint)
+        self._log_question_plan(method="API 分页", title=title, total_answers=total_hint, content_mode=content_mode)
 
         answers: list[Answer] = []
         pending_batch: list[Answer] = []
@@ -325,17 +336,16 @@ class QuestionScraper(BaseScraper):
                     return None
                 page.goto(f"https://www.zhihu.com/question/{question_id}", timeout=30000)
                 page.wait_for_timeout(3000)
+                self._log_page_state(page, question_id)
 
                 if not question_meta["title"]:
-                    try:
-                        question_meta["title"] = page.locator("h1").first.text_content(timeout=5000).strip()
-                    except Exception:
-                        question_meta["title"] = ""
+                    question_meta["title"] = self._extract_question_title_from_page(page) or ""
 
                 self._log_question_plan(
                     method="Playwright 页面滚动",
                     title=question_meta["title"] or question_id,
                     total_answers=total_hint,
+                    content_mode=content_mode,
                 )
                 logger.info("进入页面兜底抓取流程，开始滚动加载回答")
 
@@ -348,7 +358,8 @@ class QuestionScraper(BaseScraper):
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(1200)
 
-                    count = page.locator(".List-item").count()
+                    items = self._locate_answer_items(page)
+                    count = items.count()
                     if count != prev_count:
                         logger.info(f"滚动轮次 {i}: 回答节点 {prev_count} -> {count}")
                         prev_count = count
@@ -363,8 +374,10 @@ class QuestionScraper(BaseScraper):
                     flush_pending(force=True)
                     return None
 
-                items = page.locator(".List-item")
+                items = self._locate_answer_items(page)
                 total = items.count()
+                if total == 0:
+                    logger.warning("页面模式没有匹配到回答节点，可能是页面结构变化、登录失效或触发安全验证")
                 logger.info(f"页面模式开始提取回答: total={total}")
 
                 for i in range(total):
@@ -444,6 +457,7 @@ class QuestionScraper(BaseScraper):
                     return None
                 page.goto(f"https://www.zhihu.com/question/{question_id}", timeout=30000)
                 page.wait_for_timeout(3000)
+                self._log_page_state(page, question_id)
 
                 detail = self._browser_fetch_json(
                     page,
@@ -473,7 +487,7 @@ class QuestionScraper(BaseScraper):
                     "content_mode": content_mode,
                     "description": (
                         self._html_to_text(detail_data.get("detail") or detail_data.get("excerpt") or "")
-                        if content_mode == "text"
+                        if content_mode in {"text", "fast"}
                         else (detail_data.get("detail") or detail_data.get("excerpt") or "")
                     ),
                     "created_time": self._parse_timestamp(detail_data.get("created")),
@@ -483,7 +497,7 @@ class QuestionScraper(BaseScraper):
                     "follower_count": int(detail_data.get("follower_count") or 0),
                     "answers": [],
                 }
-                self._log_question_plan(method="Playwright 浏览器接口", title=title, total_answers=total_hint)
+                self._log_question_plan(method="Playwright 浏览器接口", title=title, total_answers=total_hint, content_mode=content_mode)
 
                 answers = list(existing_question.answers) if existing_question else []
                 seen_ids = {answer.id for answer in answers if answer.id}
@@ -651,10 +665,8 @@ async ({ path, params }) => {
         return {"status": result.get("status"), "data": data, "text": text}
 
     def _extract_question_meta_from_dom(self, page, question_id: str, existing_question: Optional[Question]) -> dict:
-        title = ""
-        try:
-            title = page.locator("h1").first.text_content(timeout=5000).strip()
-        except Exception:
+        title = self._extract_question_title_from_page(page)
+        if not title:
             title = existing_question.title if existing_question else ""
 
         answer_count = existing_question.answer_count if existing_question else 0
@@ -677,11 +689,82 @@ async ({ path, params }) => {
             "updated_time": int(existing_question.updated_time.timestamp()) if existing_question and existing_question.updated_time else None,
         }
 
-    def _log_question_plan(self, method: str, title: str, total_answers: int) -> None:
+    def _extract_question_title_from_page(self, page) -> str:
+        selectors = [
+            "h1.QuestionHeader-title",
+            ".QuestionHeader-title",
+            "main h1",
+            "h1",
+        ]
+        for selector in selectors:
+            try:
+                text = page.locator(selector).first.text_content(timeout=2500)
+                if text and text.strip():
+                    return text.strip()
+            except Exception:
+                continue
+        try:
+            title = (page.title() or "").strip()
+        except Exception:
+            title = ""
+        if title:
+            title = re.sub(r"\s*-\s*知乎.*$", "", title).strip()
+            if title and title != "知乎":
+                return title
+        try:
+            html = page.content()
+            match = (
+                re.search(r'"title"\s*:\s*"([^"]+)"', html)
+                or re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+            )
+            if match:
+                text = unescape(match.group(1)).strip()
+                text = re.sub(r"\s*-\s*知乎.*$", "", text).strip()
+                if text and text != "知乎":
+                    return text
+        except Exception:
+            pass
+        return ""
+
+    def _locate_answer_items(self, page):
+        selectors = [
+            ".Question-main .AnswerItem",
+            ".Question-main .List-item",
+            ".Question-main [data-zop-question-answer]",
+            ".AnswerItem",
+            ".List-item",
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                if locator.count() > 0:
+                    return locator
+            except Exception:
+                continue
+        return page.locator(".List-item")
+
+    def _log_page_state(self, page, question_id: str) -> None:
+        try:
+            title = (page.title() or "").strip()
+        except Exception:
+            title = ""
+        try:
+            html = page.content()
+        except Exception:
+            html = ""
+        markers = []
+        if "安全验证" in html or "verify" in title.lower():
+            markers.append("可能触发安全验证")
+        if "登录后" in html or "登录即可" in html:
+            markers.append("页面可能处于登录受限状态")
+        if markers:
+            logger.warning(f"问题页面状态提示: question_id={question_id}, {'；'.join(markers)}")
+
+    def _log_question_plan(self, method: str, title: str, total_answers: int, content_mode: str = "full") -> None:
         if method == "API 分页":
-            estimated_seconds = self._estimate_api_duration(total_answers)
+            estimated_seconds = self._estimate_api_duration(total_answers, content_mode)
         else:
-            estimated_seconds = self._estimate_playwright_duration(total_answers)
+            estimated_seconds = self._estimate_playwright_duration(total_answers, content_mode)
         eta = datetime.now() + timedelta(seconds=estimated_seconds)
         logger.info(f"✓ 问题标题: {title}")
         logger.info(f"✓ 当前抓取方法: {method}")
@@ -758,14 +841,17 @@ async ({ path, params }) => {
         )
 
     @staticmethod
-    def _estimate_api_duration(total_answers: int) -> float:
+    def _estimate_api_duration(total_answers: int, content_mode: str = "full") -> float:
         request_count = 1 + max(1, math.ceil(max(total_answers, 1) / QuestionScraper.API_PAGE_SIZE))
         avg_request_seconds = ((REQUEST_DELAY_MIN + REQUEST_DELAY_MAX) / 2) + 0.35
+        if content_mode == "fast":
+            avg_request_seconds = max(0.5, avg_request_seconds * 0.6)
         return request_count * avg_request_seconds
 
     @staticmethod
-    def _estimate_playwright_duration(total_answers: int) -> float:
-        return 20 + (max(total_answers, 50) * 0.9)
+    def _estimate_playwright_duration(total_answers: int, content_mode: str = "full") -> float:
+        factor = 0.45 if content_mode == "fast" else 0.9
+        return 20 + (max(total_answers, 50) * factor)
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

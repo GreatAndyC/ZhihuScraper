@@ -7,7 +7,13 @@ import os
 from scraper import QuestionScraper, UserScraper, FeedScraper
 from renderers import render_question_html, render_user_html
 from input_normalizer import normalize_question_input, normalize_user_input
+from export_utils import build_question_export_meta, build_user_export_meta
 from storage import (
+    find_existing_html_for_json,
+    find_existing_question_json,
+    find_existing_user_json,
+    load_question,
+    load_user,
     merge_question_batches,
     prepare_question_batch_dir,
     save_question,
@@ -22,12 +28,44 @@ logging.basicConfig(
 )
 
 
+def _can_reuse_existing_mode(existing_mode: str, requested_mode: str) -> bool:
+    existing_mode = existing_mode or "full"
+    if requested_mode == "full":
+        return existing_mode == "full"
+    if requested_mode in {"text", "fast"}:
+        return existing_mode in {"text", "fast", "full"}
+    return False
+
+
+def _can_reuse_user_content_types(existing_types: list[str], requested_types: list[str]) -> bool:
+    return set(requested_types or []).issubset(set(existing_types or []))
+
+
 def cmd_question(args):
     question_id = normalize_question_input(args.question_id)
-    scraper = QuestionScraper(conservative_mode=args.conservative)
+    profile = "conservative" if args.conservative else args.profile
+    if not args.force:
+        existing_json = find_existing_question_json(question_id)
+        if existing_json:
+            existing_question = load_question(existing_json)
+            existing_mode = existing_question.content_mode or (existing_question.export_meta or {}).get("content_mode", "full")
+            if _can_reuse_existing_mode(existing_mode, args.mode):
+                print(f"检测到本地已有问题归档，跳过重复抓取: {existing_json}")
+                html_path = find_existing_html_for_json(existing_json, "questions", args.html_variant)
+                if args.mode == "full" and not html_path:
+                    html_path = render_question_html(
+                        existing_question,
+                        conservative_mode=profile == "conservative",
+                        progress_callback=print,
+                        variant=args.html_variant,
+                    )
+                if html_path:
+                    print(f"浏览页: {html_path}")
+                return
+    scraper = QuestionScraper(conservative_mode=profile == "conservative")
     batch_dir = prepare_question_batch_dir(question_id)
     print(f"分批保存目录: {batch_dir}")
-    print(f"抓取节奏: {'保守模式（更慢、更稳）' if args.conservative else '标准模式'}")
+    print(f"抓取节奏: {'保守模式（更慢、更稳）' if profile == 'conservative' else ('快速模式（更快，可能不完整）' if profile == 'fast' else '标准模式')}")
     if question_id != args.question_id:
         print(f"已识别问题 ID: {question_id}")
     question = scraper.fetch_all(
@@ -38,8 +76,22 @@ def cmd_question(args):
     if not question:
         print("无法获取问题内容，可能需要完成知乎安全验证", file=sys.stderr)
         sys.exit(1)
-    path = merge_question_batches(question_id) or save_question(question, question_id)
-    html_path = render_question_html(question, conservative_mode=args.conservative, progress_callback=print)
+    html_path = render_question_html(
+        question,
+        conservative_mode=profile == "conservative",
+        progress_callback=print,
+        variant=args.html_variant,
+    )
+    question.export_meta = build_question_export_meta(
+        question,
+        crawl_profile=profile,
+        html_variant=args.html_variant,
+        source_input=args.question_id,
+        output_html=html_path,
+    )
+    path = save_question(question, question_id)
+    question.export_meta["output_json"] = path
+    path = save_question(question, question_id)
     print(f"保存至: {path}")
     print(f"浏览页: {html_path}")
     print(f"问题: {question.title}")
@@ -57,8 +109,27 @@ def cmd_merge_question(args):
 
 def cmd_user(args):
     user_id = normalize_user_input(args.user_id)
-    scraper = UserScraper(conservative_mode=args.conservative)
-    print(f"抓取节奏: {'保守模式（更慢、更稳）' if args.conservative else '标准模式'}")
+    profile = "conservative" if args.conservative else args.profile
+    if not args.force:
+        existing_json = find_existing_user_json(user_id)
+        if existing_json:
+            existing_user = load_user(existing_json)
+            existing_mode = existing_user.content_mode or (existing_user.export_meta or {}).get("content_mode", "full")
+            if _can_reuse_existing_mode(existing_mode, args.mode) and _can_reuse_user_content_types(existing_user.content_types, args.types):
+                print(f"检测到本地已有用户归档，跳过重复抓取: {existing_json}")
+                html_path = find_existing_html_for_json(existing_json, "users", args.html_variant)
+                if args.mode == "full" and not html_path:
+                    html_path = render_user_html(
+                        existing_user,
+                        conservative_mode=profile == "conservative",
+                        progress_callback=print,
+                        variant=args.html_variant,
+                    )
+                if html_path:
+                    print(f"浏览页: {html_path}")
+                return
+    scraper = UserScraper(conservative_mode=profile == "conservative")
+    print(f"抓取节奏: {'保守模式（更慢、更稳）' if profile == 'conservative' else ('快速模式（更快，可能不完整）' if profile == 'fast' else '标准模式')}")
     if user_id != args.user_id:
         print(f"已识别用户 ID: {user_id}")
     user = scraper.fetch_all(
@@ -69,8 +140,22 @@ def cmd_user(args):
     if not user:
         print(f"无法获取用户 {user_id}", file=sys.stderr)
         sys.exit(1)
+    html_path = render_user_html(
+        user,
+        conservative_mode=profile == "conservative",
+        progress_callback=print,
+        variant=args.html_variant,
+    )
+    user.export_meta = build_user_export_meta(
+        user,
+        crawl_profile=profile,
+        html_variant=args.html_variant,
+        source_input=args.user_id,
+        output_html=html_path,
+    )
     path = save_user(user, user_id)
-    html_path = render_user_html(user, conservative_mode=args.conservative, progress_callback=print)
+    user.export_meta["output_json"] = path
+    path = save_user(user, user_id)
     print(f"保存至: {path}")
     print(f"浏览页: {html_path}")
     print(f"用户: {user.name}")
@@ -118,16 +203,22 @@ def main():
 
     p_question = subparsers.add_parser("question", help="爬取问题及全部回答")
     p_question.add_argument("question_id", help="问题 ID 或完整知乎问题链接")
-    p_question.add_argument("--mode", choices=["full", "text"], default="full", help="保存模式")
+    p_question.add_argument("--mode", choices=["full", "text", "fast"], default="full", help="保存模式")
     p_question.add_argument("--conservative", action="store_true", help="保守模式，更慢、更稳")
+    p_question.add_argument("--profile", choices=["standard", "fast"], default="standard", help="抓取策略")
+    p_question.add_argument("--html-variant", choices=["dir", "single"], default="dir", help="HTML 导出模式")
+    p_question.add_argument("--force", action="store_true", help="忽略本地已有归档，强制重新抓取")
 
     p_merge_question = subparsers.add_parser("merge-question", help="合并已保存的问题回答批次文件")
     p_merge_question.add_argument("question_id", help="问题 ID 或完整知乎问题链接")
 
     p_user = subparsers.add_parser("user", help="爬取用户主页及动态")
     p_user.add_argument("user_id", help="用户 ID、url_token 或完整知乎用户链接")
-    p_user.add_argument("--mode", choices=["full", "text"], default="full", help="保存模式")
+    p_user.add_argument("--mode", choices=["full", "text", "fast"], default="full", help="保存模式")
     p_user.add_argument("--conservative", action="store_true", help="保守模式，更慢、更稳")
+    p_user.add_argument("--profile", choices=["standard", "fast"], default="standard", help="抓取策略")
+    p_user.add_argument("--html-variant", choices=["dir", "single"], default="dir", help="HTML 导出模式")
+    p_user.add_argument("--force", action="store_true", help="忽略本地已有归档，强制重新抓取")
     p_user.add_argument(
         "--types",
         nargs="+",

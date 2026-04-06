@@ -27,6 +27,7 @@ class Question(BaseModel):
     id: str
     title: str
     content_mode: str = "full"
+    export_meta: dict = Field(default_factory=dict)
     description: str = ""
     created_time: Optional[datetime] = None
     updated_time: Optional[datetime] = None
@@ -53,6 +54,7 @@ class User(BaseModel):
     name: str
     content_mode: str = "full"
     content_types: List[str] = Field(default_factory=list)
+    export_meta: dict = Field(default_factory=dict)
     headline: Optional[str] = ""
     avatar_url: Optional[str] = ""
     followers_count: int = 0

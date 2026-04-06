@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import random
@@ -16,6 +17,7 @@ from config import (
     CONSERVATIVE_ASSET_DOWNLOAD_DELAY_MIN,
     OUTPUT_DIR,
 )
+from export_utils import question_export_stem, user_export_stem
 
 ZHIMG_HEADERS = {
     "User-Agent": (
@@ -26,7 +28,16 @@ ZHIMG_HEADERS = {
     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 }
 
-IMG_URL_RE = re.compile(r"""(?P<name>src|data-original|data-actualsrc)=(?P<quote>["'])(?P<url>https?://[^"' ]+)(?P=quote)""")
+IMG_URL_RE = re.compile(
+    r"""(?<![\w-])(?P<name>src|data-original|data-actualsrc|data-src)=(?P<quote>["'])(?P<url>https?://[^"' ]+)(?P=quote)""",
+    re.IGNORECASE,
+)
+IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+IMG_ATTR_RE = re.compile(
+    r"""(?<![\w-])(?P<name>src|data-original|data-actualsrc|data-src|srcset)=(?P<quote>["'])(?P<value>.*?)(?P=quote)""",
+    re.IGNORECASE,
+)
+LAZY_PLACEHOLDER_RE = re.compile(r"^data:image/(?:svg\+xml|gif)", re.IGNORECASE)
 
 
 def _format_time(value) -> str:
@@ -97,7 +108,7 @@ def _avatar_markup(src: str, alt: str, fallback_text: str) -> str:
 
 
 def _content_block(html: str, text: str, mode: str) -> str:
-    if mode == "text":
+    if mode in {"text", "fast"}:
         if not text:
             return '<div class="content empty">没有可显示的正文。</div>'
         return f'<div class="content text-only">{escape(text)}</div>'
@@ -168,13 +179,32 @@ def _page_script(enable_type_filter: bool) -> str:
 """
 
 
-def _html_shell(title: str, hero: str, controls: str, cards: str, enable_type_filter: bool = False) -> str:
+def _html_shell(
+    title: str,
+    hero: str,
+    controls: str,
+    cards: str,
+    enable_type_filter: bool = False,
+    web_base: str = "",
+) -> str:
+    base_script = ""
+    if web_base:
+        base_script = f"""
+  <script>
+    if (window.location.pathname === '/file') {{
+      const base = document.createElement('base');
+      base.href = {web_base!r};
+      document.head.appendChild(base);
+    }}
+  </script>
+"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{escape(title)}</title>
+{base_script}
   <style>
     :root {{
       --zh-bg: #f6f6f6;
@@ -424,6 +454,20 @@ def _html_shell(title: str, hero: str, controls: str, cards: str, enable_type_fi
       padding: 12px 14px;
       border: 1px solid var(--zh-line);
     }}
+    .content blockquote {{
+      margin: 16px 0;
+      padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--zh-line);
+      background: #f7f8fa;
+      color: #444;
+    }}
+    .content blockquote p {{
+      margin: 0 0 10px;
+    }}
+    .content blockquote p:last-child {{
+      margin-bottom: 0;
+    }}
     .text-only {{
       white-space: pre-wrap;
       background: #f7f8fa;
@@ -484,6 +528,7 @@ class AssetLocalizer:
         asset_key: str,
         enabled: bool,
         conservative_mode: bool = False,
+        variant: str = "dir",
         total_assets: int = 0,
         progress_callback=None,
     ):
@@ -491,6 +536,7 @@ class AssetLocalizer:
         self.page_dir = os.path.dirname(page_path)
         self.enabled = enabled
         self.conservative_mode = conservative_mode
+        self.variant = variant
         self.asset_dir = os.path.join(OUTPUT_DIR, "html", "assets", asset_group, _safe_filename(asset_key))
         self.session = requests.Session()
         self.cache: dict[str, str] = {}
@@ -518,6 +564,17 @@ class AssetLocalizer:
         if url in self.cache:
             return self.cache[url]
 
+        ext = _guess_extension(url, "")
+        filename = f"{_safe_filename(prefix)}-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}{ext}"
+        disk_path = os.path.join(self.asset_dir, filename)
+        relative_path = os.path.relpath(disk_path, self.page_dir).replace(os.sep, "/")
+        if self.variant == "dir" and os.path.exists(disk_path):
+            self.processed_assets += 1
+            self.saved_assets += 1
+            self._emit_progress()
+            self.cache[url] = relative_path
+            return relative_path
+
         self._delay()
         try:
             response = self.session.get(url, headers=ZHIMG_HEADERS, timeout=25)
@@ -535,6 +592,15 @@ class AssetLocalizer:
             return url
 
         ext = _guess_extension(url, response.headers.get("Content-Type", ""))
+        if self.variant == "single":
+            mime = (response.headers.get("Content-Type") or "").split(";")[0].strip() or f"image/{ext.lstrip('.')}"
+            encoded = base64.b64encode(response.content).decode("ascii")
+            data_uri = f"data:{mime};base64,{encoded}"
+            self.processed_assets += 1
+            self.saved_assets += 1
+            self._emit_progress()
+            self.cache[url] = data_uri
+            return data_uri
         filename = f"{_safe_filename(prefix)}-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}{ext}"
         disk_path = os.path.join(self.asset_dir, filename)
         with open(disk_path, "wb") as f:
@@ -558,7 +624,7 @@ class AssetLocalizer:
                 replacements.append((url, local))
         for url, local in replacements:
             rewritten = rewritten.replace(url, local)
-        return rewritten
+        return _normalize_lazy_image_tags(rewritten)
 
     def _emit_progress(self) -> None:
         if not self.progress_callback:
@@ -588,6 +654,52 @@ def _extract_asset_urls(html: str) -> list[str]:
             seen.add(url)
             urls.append(url)
     return urls
+
+
+def _normalize_lazy_image_tags(html: str) -> str:
+    if not html or "<img" not in html.lower():
+        return html
+
+    def replace_img(match):
+        tag = match.group(0)
+        attrs = {}
+        for attr_match in IMG_ATTR_RE.finditer(tag):
+            attrs[attr_match.group("name").lower()] = attr_match.group("value")
+
+        preferred_src = (
+            attrs.get("data-actualsrc")
+            or attrs.get("data-original")
+            or attrs.get("data-src")
+            or attrs.get("src")
+            or ""
+        )
+        current_src = attrs.get("src", "")
+
+        if preferred_src and (not current_src or LAZY_PLACEHOLDER_RE.match(current_src)):
+            if "src" in attrs:
+                tag = re.sub(
+                    r"""(?<![\w-])src=(["']).*?\1""",
+                    lambda m: f'src="{preferred_src}"',
+                    tag,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+            else:
+                tag = tag[:-1] + f' src="{preferred_src}">'
+
+        srcset = attrs.get("srcset", "")
+        if srcset and (LAZY_PLACEHOLDER_RE.match(current_src or "") or LAZY_PLACEHOLDER_RE.match(srcset)):
+            if preferred_src:
+                tag = re.sub(
+                    r"""(?<![\w-])srcset=(["']).*?\1""",
+                    lambda m: f'srcset="{preferred_src}"',
+                    tag,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+        return tag
+
+    return IMG_TAG_RE.sub(replace_img, html)
 
 
 def _estimate_question_assets(question) -> list[str]:
@@ -627,10 +739,12 @@ def _estimate_user_assets(user) -> list[str]:
     return urls
 
 
-def render_question_html(question, conservative_mode: bool = False, progress_callback=None) -> str:
+def render_question_html(question, conservative_mode: bool = False, progress_callback=None, variant: str = "dir") -> str:
     html_dir = os.path.join(OUTPUT_DIR, "html", "questions")
     os.makedirs(html_dir, exist_ok=True)
-    path = os.path.join(html_dir, f"{question.id}.html")
+    stem = question_export_stem(question)
+    suffix = "-single" if variant == "single" else ""
+    path = os.path.join(html_dir, f"{stem}{suffix}.html")
     asset_urls = _estimate_question_assets(question)
     if progress_callback:
         progress_callback(f"✓ 开始生成问题浏览页: {path}")
@@ -639,9 +753,10 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
     localizer = AssetLocalizer(
         page_path=path,
         asset_group="questions",
-        asset_key=question.id,
+        asset_key=stem,
         enabled=getattr(question, "content_mode", "full") == "full",
         conservative_mode=conservative_mode,
+        variant=variant,
         total_assets=len(asset_urls),
         progress_callback=progress_callback,
     )
@@ -690,11 +805,12 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
       </div>
       {_content_block(description_html, question.description, getattr(question, "content_mode", "full")) if question.description else ''}
       <div class="meta-list">
+        <span><a href="https://www.zhihu.com/question/{escape(question.id)}" target="_blank" rel="noreferrer">打开原始问题</a></span>
         <span>问题 ID: {escape(question.id)}</span>
         <span>回答数: {len(question.answers)} / {question.answer_count}</span>
         <span>关注: {question.follower_count}</span>
         <span>评论: {question.comment_count}</span>
-        <span>模式: {'纯文字 JSON' if getattr(question, 'content_mode', 'full') == 'text' else '完整内容（离线图片）'}</span>
+        <span>模式: {_mode_label(getattr(question, 'content_mode', 'full'))}</span>
         <span>生成时间: {escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</span>
       </div>
     </section>
@@ -711,7 +827,15 @@ def render_question_html(question, conservative_mode: bool = False, progress_cal
     </section>
     """
     with open(path, "w", encoding="utf-8") as f:
-        f.write(_html_shell(question.title, hero, controls, "".join(answer_cards) or '<div class="item-card empty">没有抓到回答。</div>'))
+        f.write(
+            _html_shell(
+                question.title,
+                hero,
+                controls,
+                "".join(answer_cards) or '<div class="item-card empty">没有抓到回答。</div>',
+                web_base="/output/html/questions/" if variant == "dir" else "",
+            )
+        )
     if progress_callback and getattr(question, "content_mode", "full") == "full":
         progress_callback(f"✓ 离线资源下载完成: 成功={localizer.saved_assets}, 失败={localizer.failed_assets}")
     return path
@@ -735,10 +859,20 @@ def _type_label(kind: str) -> str:
     }.get(kind, kind)
 
 
-def render_user_html(user, conservative_mode: bool = False, progress_callback=None) -> str:
+def _mode_label(kind: str) -> str:
+    return {
+        "full": "完整内容（离线图片）",
+        "text": "纯文字 JSON",
+        "fast": "快速预览",
+    }.get(kind, kind)
+
+
+def render_user_html(user, conservative_mode: bool = False, progress_callback=None, variant: str = "dir") -> str:
     html_dir = os.path.join(OUTPUT_DIR, "html", "users")
     os.makedirs(html_dir, exist_ok=True)
-    path = os.path.join(html_dir, f"{user.id}.html")
+    stem = user_export_stem(user)
+    suffix = "-single" if variant == "single" else ""
+    path = os.path.join(html_dir, f"{stem}{suffix}.html")
     asset_urls = _estimate_user_assets(user)
     if progress_callback:
         progress_callback(f"✓ 开始生成用户浏览页: {path}")
@@ -747,9 +881,10 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
     localizer = AssetLocalizer(
         page_path=path,
         asset_group="users",
-        asset_key=user.id,
+        asset_key=stem,
         enabled=getattr(user, "content_mode", "full") == "full",
         conservative_mode=conservative_mode,
+        variant=variant,
         total_assets=len(asset_urls),
         progress_callback=progress_callback,
     )
@@ -793,12 +928,13 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
         </div>
       </div>
       <div class="meta-list">
+        <span><a href="https://www.zhihu.com/people/{escape(user.id)}" target="_blank" rel="noreferrer">打开知乎主页</a></span>
         <span>用户 ID: {escape(user.id)}</span>
         <span>动态数: {len(user.activities)}</span>
         <span>粉丝: {user.followers_count}</span>
         <span>关注: {user.following_count}</span>
         <span>内容类型: {escape(' / '.join(getattr(user, 'content_types', []) or ['answer']))}</span>
-        <span>模式: {'纯文字 JSON' if getattr(user, 'content_mode', 'full') == 'text' else '完整内容（离线图片）'}</span>
+        <span>模式: {_mode_label(getattr(user, 'content_mode', 'full'))}</span>
         <span>生成时间: {escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</span>
       </div>
     </section>
@@ -830,6 +966,7 @@ def render_user_html(user, conservative_mode: bool = False, progress_callback=No
                 controls,
                 "".join(cards) or '<div class="item-card empty">没有抓到用户动态。</div>',
                 enable_type_filter=True,
+                web_base="/output/html/users/" if variant == "dir" else "",
             )
         )
     if progress_callback and getattr(user, "content_mode", "full") == "full":

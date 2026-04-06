@@ -3,6 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from html import unescape
+from html import escape
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,7 @@ class UserScraper(BaseScraper):
     MEMBER_API = "https://www.zhihu.com/api/v4/members/{user_id}"
     CONTENT_PAGE_SIZE = 20
     SUPPORTED_TYPES = ("answer", "article", "pin")
+    DETAIL_403_FUSE_THRESHOLD = 3
 
     def fetch_all(
         self,
@@ -269,6 +271,7 @@ class UserScraper(BaseScraper):
 
         if content_type == "pin":
             html = self._normalize_html(item.get("content_html") or item.get("content"))
+            html = self._append_pin_reference_html(html, item)
             text = self._html_to_text(html)
             title = text[:32] if text else f"想法 {item.get('id', '')}"
             return Activity(
@@ -290,6 +293,10 @@ class UserScraper(BaseScraper):
         start_time = time.monotonic()
         total = len(activities)
         success_count = 0
+        detail_policy = {
+            kind: {"consecutive_403": 0, "bypass_api": False}
+            for kind in self.SUPPORTED_TYPES
+        }
 
         for index, activity in enumerate(activities, start=1):
             if not can_continue():
@@ -299,7 +306,25 @@ class UserScraper(BaseScraper):
                 logger.info(
                     f"补全正文详情: index={index}/{total}, type={activity.type}, id={activity.id}"
                 )
-            detail = self._fetch_activity_detail(page, activity)
+            policy = detail_policy.setdefault(activity.type, {"consecutive_403": 0, "bypass_api": False})
+            detail, api_status = self._fetch_activity_detail(
+                page,
+                activity,
+                bypass_api=bool(policy.get("bypass_api")),
+            )
+            if api_status == 403:
+                policy["consecutive_403"] = int(policy.get("consecutive_403", 0)) + 1
+                if (
+                    not policy.get("bypass_api")
+                    and policy["consecutive_403"] >= self.DETAIL_403_FUSE_THRESHOLD
+                ):
+                    policy["bypass_api"] = True
+                    logger.warning(
+                        f"{self._type_label(activity.type)}详情接口连续 {policy['consecutive_403']} 次 403，"
+                        f"后续同类型内容将直接走页面兜底，避免继续触发风控"
+                    )
+            elif api_status is not None:
+                policy["consecutive_403"] = 0
             if detail:
                 activity = detail
             if activity.content_html:
@@ -317,8 +342,10 @@ class UserScraper(BaseScraper):
         logger.info(f"✓ 正文补全完成: 成功={success_count}, 失败={total - success_count}")
         return enriched
 
-    def _fetch_activity_detail(self, page, activity: Activity) -> Optional[Activity]:
+    def _fetch_activity_detail(self, page, activity: Activity, bypass_api: bool = False) -> tuple[Optional[Activity], Optional[int]]:
         if activity.type == "answer":
+            if bypass_api:
+                return self._fetch_answer_detail_from_page(page, activity), None
             result = self._browser_fetch_json(
                 page,
                 f"/api/v4/answers/{activity.id}",
@@ -329,7 +356,7 @@ class UserScraper(BaseScraper):
             if not result or result["status"] != 200 or not result["data"]:
                 status = "无响应" if not result else f"status={result['status']}"
                 logger.warning(f"回答详情获取失败: id={activity.id}, {status}，尝试页面兜底")
-                return self._fetch_answer_detail_from_page(page, activity)
+                return self._fetch_answer_detail_from_page(page, activity), (result or {}).get("status")
             data = result["data"]
             question = data.get("question") or {}
             html = self._normalize_html(data.get("content"))
@@ -344,9 +371,11 @@ class UserScraper(BaseScraper):
                 upvote_count=int(data.get("voteup_count") or activity.upvote_count or 0),
                 comment_count=int(data.get("comment_count") or activity.comment_count or 0),
                 created_time=self._parse_timestamp(data.get("created_time")) or activity.created_time,
-            )
+            ), 200
 
         if activity.type == "article":
+            if bypass_api:
+                return self._fetch_article_detail_from_page(page, activity), None
             result = self._browser_fetch_json(
                 page,
                 f"/api/v4/articles/{activity.id}",
@@ -357,7 +386,7 @@ class UserScraper(BaseScraper):
             if not result or result["status"] != 200 or not result["data"]:
                 status = "无响应" if not result else f"status={result['status']}"
                 logger.warning(f"文章详情获取失败: id={activity.id}, {status}，尝试页面兜底")
-                return self._fetch_article_detail_from_page(page, activity)
+                return self._fetch_article_detail_from_page(page, activity), (result or {}).get("status")
             data = result["data"]
             html = self._normalize_html(data.get("content"))
             text = self._html_to_text(html)
@@ -371,9 +400,11 @@ class UserScraper(BaseScraper):
                 upvote_count=int(data.get("voteup_count") or activity.upvote_count or 0),
                 comment_count=int(data.get("comment_count") or activity.comment_count or 0),
                 created_time=self._parse_timestamp(data.get("created")) or activity.created_time,
-            )
+            ), 200
 
         if activity.type == "pin":
+            if bypass_api:
+                return self._fetch_pin_detail_from_page(page, activity), None
             result = self._browser_fetch_json(
                 page,
                 f"/api/v4/pins/{activity.id}",
@@ -384,9 +415,10 @@ class UserScraper(BaseScraper):
             if not result or result["status"] != 200 or not result["data"]:
                 status = "无响应" if not result else f"status={result['status']}"
                 logger.warning(f"想法详情获取失败: id={activity.id}, {status}，尝试页面兜底")
-                return self._fetch_pin_detail_from_page(page, activity)
+                return self._fetch_pin_detail_from_page(page, activity), (result or {}).get("status")
             data = result["data"]
             html = self._normalize_html(data.get("content_html") or data.get("content"))
+            html = self._append_pin_reference_html(html, data)
             text = self._html_to_text(html)
             return Activity(
                 id=activity.id,
@@ -398,9 +430,9 @@ class UserScraper(BaseScraper):
                 upvote_count=int(data.get("like_count") or activity.upvote_count or 0),
                 comment_count=int(data.get("comment_count") or activity.comment_count or 0),
                 created_time=self._parse_timestamp(data.get("created")) or activity.created_time,
-            )
+            ), 200
 
-        return None
+        return None, None
 
     def _fetch_answer_detail_from_page(self, page, activity: Activity) -> Optional[Activity]:
         if not activity.target_id:
@@ -499,7 +531,8 @@ class UserScraper(BaseScraper):
             "pin": int(profile.get("pins_count") or 0),
         }
         selected_total = sum(counts.get(kind, 0) for kind in content_types)
-        estimated_seconds = max(12, selected_total * (0.2 if content_mode == "text" else 0.9))
+        per_item = 0.1 if content_mode == "fast" else (0.2 if content_mode == "text" else 0.9)
+        estimated_seconds = max(12, selected_total * per_item)
         eta = datetime.now() + timedelta(seconds=estimated_seconds)
         logger.info(f"✓ 用户名: {profile.get('name') or profile.get('id')}")
         logger.info(f"✓ 抓取类型: {', '.join(content_types)}")
@@ -728,3 +761,114 @@ async ({ path, params }) => {
         if secs or not parts:
             parts.append(f"{secs}秒")
         return "".join(parts)
+
+    @classmethod
+    def _append_pin_reference_html(cls, html: str, item: dict) -> str:
+        card = cls._build_pin_reference_html(item)
+        if not card:
+            return html
+        if html:
+            return f"{html}{card}"
+        return card
+
+    @classmethod
+    def _build_pin_reference_html(cls, item: dict) -> str:
+        candidates = []
+        for key in (
+            "target",
+            "origin_pin",
+            "quote",
+            "quoted_item",
+            "share_info",
+            "link_card",
+            "card",
+            "attachment",
+            "shared_content",
+            "shared_target",
+            "share_target",
+        ):
+            value = item.get(key)
+            if value:
+                candidates.append(value)
+
+        for candidate in candidates:
+            reference = cls._extract_reference_info(candidate)
+            if not reference:
+                continue
+            url = reference.get("url") or ""
+            title = reference.get("title") or "打开原始转发内容"
+            summary = reference.get("summary") or ""
+            kind = reference.get("kind") or "转发内容"
+            pieces = [
+                '<blockquote class="pin-reference">',
+                f'<p><strong>{escape(kind)}</strong></p>',
+            ]
+            if url:
+                pieces.append(
+                    f'<p><a href="{escape(url)}" target="_blank" rel="noreferrer">{escape(title)}</a></p>'
+                )
+            else:
+                pieces.append(f"<p>{escape(title)}</p>")
+            if summary and summary != title:
+                pieces.append(f"<p>{escape(summary[:220])}</p>")
+            pieces.append("</blockquote>")
+            return "".join(pieces)
+        return ""
+
+    @classmethod
+    def _extract_reference_info(cls, value) -> Optional[dict]:
+        if not isinstance(value, (dict, list)):
+            return None
+        url = cls._find_first_url(value)
+        title = cls._find_first_named_text(value, ("title", "name", "question_text", "headline"))
+        summary = cls._find_first_named_text(value, ("excerpt", "description", "text", "content"))
+        kind = cls._find_first_named_text(value, ("type", "target_type", "object_type"))
+        if not any((url, title, summary)):
+            return None
+        return {
+            "url": url,
+            "title": title,
+            "summary": summary,
+            "kind": kind,
+        }
+
+    @classmethod
+    def _find_first_url(cls, value) -> str:
+        if isinstance(value, str):
+            match = __import__("re").search(r"https?://[^\s\"'>]+", value)
+            return match.group(0) if match else ""
+        if isinstance(value, list):
+            for item in value:
+                found = cls._find_first_url(item)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, dict):
+            for key in ("url", "link", "href", "landing_url", "target_url", "schema"):
+                found = cls._find_first_url(value.get(key))
+                if found:
+                    return found
+            for nested in value.values():
+                found = cls._find_first_url(nested)
+                if found:
+                    return found
+        return ""
+
+    @classmethod
+    def _find_first_named_text(cls, value, keys: tuple[str, ...]) -> str:
+        if isinstance(value, dict):
+            for key in keys:
+                raw = value.get(key)
+                text = cls._stringify(raw).strip()
+                if text and not text.startswith("{") and not text.startswith("["):
+                    return cls._html_to_text(text) if "<" in text else text
+            for nested in value.values():
+                text = cls._find_first_named_text(nested, keys)
+                if text:
+                    return text
+        elif isinstance(value, list):
+            for item in value:
+                text = cls._find_first_named_text(item, keys)
+                if text:
+                    return text
+        return ""
