@@ -195,12 +195,19 @@ graph TD
 ### 2. 安装依赖
 
 ```bash
+# Windows
+python -m venv venv
+.\venv\Scripts\pip install -r requirements.txt
+.\venv\Scripts\playwright install chromium
+
+# macOS / Linux
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/playwright install chromium
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
 ```
 
-也可以直接：
+也可以直接使用 Makefile（如果你安装了 Make）：
 
 ```bash
 make setup
@@ -280,18 +287,28 @@ ZHIHU_COOKIE=这里粘贴完整Cookie
 
 ### 方式一：GUI（推荐）
 
-```bash
-venv/bin/python gui.py
+#### Windows
+```powershell
+.\venv\Scripts\python.exe gui.py
 ```
 
-如果 `8080` 被占用，GUI 会自动切换到下一个可用端口。  
-也可以手动指定：
-
+#### macOS / Linux
 ```bash
-GUI_PORT=8081 venv/bin/python gui.py
+./venv/bin/python3 gui.py
 ```
 
-启动后浏览器打开终端中显示的地址即可。
+> **提示**：如果 `8080` 端口被占用，程序会自动尝试下一个可用端口。
+> 启动后，控制台会输出类似 `Starting server on http://localhost:8080` 的信息，直接在浏览器打开即可。
+
+如果需要手动指定端口：
+
+```bash
+# Windows (PowerShell)
+$env:GUI_PORT=8081; .\venv\Scripts\python.exe gui.py
+
+# macOS / Linux
+GUI_PORT=8081 ./venv/bin/python3 gui.py
+```
 
 ### 方式二：CLI
 
