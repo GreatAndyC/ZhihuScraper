@@ -22,7 +22,7 @@ help:
 	$(APP) main.py --help
 
 lint:
-	$(APP) -m py_compile main.py gui.py config.py renderers.py input_normalizer.py scraper/*.py models.py storage.py
+	$(APP) -m py_compile main.py gui.py config.py renderers.py input_normalizer.py scraper/*.py rag/*.py models.py storage.py
 
 test:
 	$(APP) -m pytest -q
