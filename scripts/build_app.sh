@@ -10,6 +10,7 @@ if [ ! -x "venv/bin/pyinstaller" ]; then
 fi
 
 export PLAYWRIGHT_BROWSERS_PATH=0
+export PYINSTALLER_CONFIG_DIR="$ROOT_DIR/.pyinstaller"
 venv/bin/pyinstaller --clean ZhihuScraper.spec
 
 echo "打包完成。输出目录：$ROOT_DIR/dist"

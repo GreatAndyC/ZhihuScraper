@@ -7,11 +7,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyinstaller/
 .coverage
 htmlcov/
 .venv/
 venv/
 output/
+build/
+dist/
 .claude/
 .idea/
 .vscode/
