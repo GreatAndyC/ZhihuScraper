@@ -2,6 +2,8 @@ import requests
 import random
 import time
 import logging
+import os
+import shutil
 from typing import Optional, Dict, Any, Callable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -32,7 +34,7 @@ USER_AGENTS = [
 
 class BaseScraper:
     def __init__(self, cookie: Optional[str] = None, conservative_mode: bool = False):
-        self.cookie = cookie or COOKIE
+        self.cookie = cookie if cookie is not None else os.getenv("ZHIHU_COOKIE", "") or COOKIE
         self.conservative_mode = conservative_mode
         self.session = self._create_session()
         self._playwright_browser = None
@@ -55,6 +57,7 @@ class BaseScraper:
         return session
 
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        active_cookie = self.cookie or os.getenv("ZHIHU_COOKIE", "")
         headers = {
             "User-Agent": random.choice(USER_AGENTS),
             "Accept": "application/json, text/plain, */*",
@@ -62,11 +65,88 @@ class BaseScraper:
             "Referer": "https://www.zhihu.com/",
             "Origin": "https://www.zhihu.com",
         }
-        if self.cookie:
-            headers["Cookie"] = self.cookie
+        if active_cookie:
+            headers["Cookie"] = active_cookie
         if extra:
             headers.update(extra)
         return headers
+
+    def _cookie_dicts(self) -> list[dict]:
+        cookies = []
+        active_cookie = self.cookie or os.getenv("ZHIHU_COOKIE", "")
+        for part in active_cookie.split(";"):
+            part = part.strip()
+            if "=" not in part or not part:
+                continue
+            name, value = part.split("=", 1)
+            cookies.append(
+                {
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".zhihu.com",
+                    "path": "/",
+                }
+            )
+        return cookies
+
+    def _playwright_launch_args(self) -> dict:
+        return {"args": ["--no-sandbox"]}
+
+    def _available_browser_channels(self) -> list[tuple[str, str]]:
+        launchers = []
+        chrome_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            shutil.which("google-chrome"),
+            shutil.which("google-chrome-stable"),
+            shutil.which("chrome"),
+        ]
+        if any(path for path in chrome_paths if path):
+            launchers.append(("系统 Chrome", "chrome"))
+
+        edge_paths = [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            shutil.which("microsoft-edge"),
+            shutil.which("microsoft-edge-stable"),
+            shutil.which("msedge"),
+        ]
+        if any(path for path in edge_paths if path):
+            launchers.append(("系统 Edge", "msedge"))
+
+        return launchers
+
+    def _launch_browser(self, playwright):
+        errors = []
+        available = self._available_browser_channels()
+        if not available:
+            raise RuntimeError("未检测到可用的系统 Chrome 或 Edge，请先安装其中一个浏览器")
+        for label, channel in available:
+            try:
+                browser = playwright.chromium.launch(channel=channel, **self._playwright_launch_args())
+                logger.info(f"已启动浏览器: {label}")
+                return browser
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+        raise RuntimeError("无法启动系统浏览器，请确认已安装且可正常打开 Chrome/Edge；" + "；".join(errors))
+
+    def _launch_persistent_context(self, playwright, user_data_dir: str, headless: bool = False):
+        errors = []
+        available = self._available_browser_channels()
+        if not available:
+            raise RuntimeError("未检测到可用的系统 Chrome 或 Edge，请先安装其中一个浏览器")
+        for label, channel in available:
+            try:
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=headless,
+                    viewport=None,
+                    channel=channel,
+                    **self._playwright_launch_args(),
+                )
+                logger.info(f"已启动持久化浏览器上下文: {label}")
+                return context
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+        raise RuntimeError("无法启动可见浏览器登录窗口，请确认已安装且可正常打开 Chrome/Edge；" + "；".join(errors))
 
     def _delay(self):
         if self.conservative_mode:
@@ -107,7 +187,7 @@ class BaseScraper:
             return None
 
         if self._playwright_browser is None:
-            self._playwright_browser = sync_playwright().start().chromium.launch(args=["--no-sandbox"])
+            self._playwright_browser = self._launch_browser(sync_playwright().start())
 
         context = self._playwright_browser.contexts[0] if self._playwright_browser.contexts else self._playwright_browser.new_context(
             user_agent=random.choice(USER_AGENTS)

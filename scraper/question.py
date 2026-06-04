@@ -259,18 +259,7 @@ class QuestionScraper(BaseScraper):
     ) -> Optional[Question]:
         from playwright.sync_api import sync_playwright
 
-        cookie_str = self.cookie
-        cookies = []
-        for part in cookie_str.split(';'):
-            part = part.strip()
-            if '=' in part and part:
-                name, value = part.split('=', 1)
-                cookies.append({
-                    "name": name.strip(),
-                    "value": value.strip(),
-                    "domain": ".zhihu.com",
-                    "path": "/",
-                })
+        cookies = self._cookie_dicts()
 
         existing_answers = list(existing_question.answers) if existing_question else []
         seen_ids = {answer.id for answer in existing_answers if answer.id}
@@ -323,7 +312,7 @@ class QuestionScraper(BaseScraper):
                 batch_index += 1
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox"])
+            browser = self._launch_browser(p)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
@@ -430,21 +419,10 @@ class QuestionScraper(BaseScraper):
     ) -> Optional[Question]:
         from playwright.sync_api import sync_playwright
 
-        cookie_str = self.cookie
-        cookies = []
-        for part in cookie_str.split(";"):
-            part = part.strip()
-            if "=" in part and part:
-                name, value = part.split("=", 1)
-                cookies.append({
-                    "name": name.strip(),
-                    "value": value.strip(),
-                    "domain": ".zhihu.com",
-                    "path": "/",
-                })
+        cookies = self._cookie_dicts()
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox"])
+            browser = self._launch_browser(p)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},

@@ -14,6 +14,7 @@ import sys
 import queue
 import mimetypes
 import re
+import webbrowser
 import requests
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,15 @@ from urllib.parse import parse_qs, urlparse, unquote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import OUTPUT_DIR
+from cookie_manager import (
+    clear_cookie_header,
+    current_cookie_header,
+    import_cookie_from_browser,
+    launch_managed_login,
+    save_cookie_header,
+    supported_browser_importers,
+    validate_cookie_header,
+)
 from export_utils import (
     build_question_export_meta,
     build_user_export_meta,
@@ -57,6 +67,15 @@ _task_seq = 0
 _worker_thread = None
 _current_task_id = None
 _log_file_path = ""
+_auth_lock = threading.Lock()
+_auth_state = {
+    "status": "idle",
+    "message": "",
+    "updated_at": None,
+    "browser": "",
+    "cookie_configured": False,
+    "account_name": "",
+}
 
 
 def _log_dir() -> str:
@@ -103,6 +122,121 @@ def _remove_log_subscriber(subscriber):
             _log_subscribers.remove(subscriber)
         except ValueError:
             pass
+
+
+def _set_auth_state(**updates):
+    with _auth_lock:
+        _auth_state.update(updates)
+        _auth_state["updated_at"] = time.time()
+
+
+def _cookie_summary() -> tuple[bool, str]:
+    header = current_cookie_header()
+    if not header:
+        return False, "未配置 Cookie"
+    return True, f"已配置 Cookie（{len(header.split(';'))} 项）"
+
+
+def _auth_snapshot() -> dict:
+    configured, summary = _cookie_summary()
+    with _auth_lock:
+        state = dict(_auth_state)
+    state["cookie_configured"] = configured
+    state["cookie_summary"] = summary
+    state["updated_text"] = format_datetime_text(state.get("updated_at"))
+    state["supported_browsers"] = [
+        {"key": key, "label": label}
+        for key, (label, _loader_name) in supported_browser_importers().items()
+    ]
+    return state
+
+
+def _refresh_auth_state_from_env() -> None:
+    configured, summary = _cookie_summary()
+    _set_auth_state(
+        status="ready" if configured else "idle",
+        message=summary,
+        browser="",
+        account_name="",
+        cookie_configured=configured,
+    )
+
+
+def _run_auth_job(job_name: str, worker):
+    with _auth_lock:
+        if _auth_state.get("status") == "running":
+            return False, "已有账号相关操作正在进行中"
+        _auth_state.update(
+            {
+                "status": "running",
+                "message": job_name,
+                "updated_at": time.time(),
+                "browser": "",
+                "account_name": "",
+            }
+        )
+
+    def runner():
+        try:
+            worker()
+        except Exception as exc:
+            _set_auth_state(status="error", message=str(exc))
+            add_log(f"✗ 账号操作失败: {exc}")
+
+    threading.Thread(target=runner, daemon=True).start()
+    return True, ""
+
+
+def _import_cookie_job(browser_key: str):
+    label = supported_browser_importers().get(browser_key, (browser_key, ""))[0]
+    add_log(f"▶ 开始从 {label} 导入知乎 Cookie")
+    header, resolved_label = import_cookie_from_browser(browser_key)
+    valid, message, profile = validate_cookie_header(header)
+    if not valid:
+        raise RuntimeError(message)
+    save_cookie_header(header)
+    account_name = (profile or {}).get("name") or (profile or {}).get("url_token") or ""
+    _set_auth_state(
+        status="ready",
+        message=f"{message}，来源：{resolved_label}",
+        browser=resolved_label,
+        account_name=account_name,
+    )
+    add_log(f"✓ 已从 {resolved_label} 导入并保存 Cookie")
+    add_log(f"✓ {message}")
+
+
+def _managed_login_job():
+    add_log("▶ 正在打开可见浏览器登录窗口")
+    header, profile = launch_managed_login(progress_callback=add_log)
+    valid, message, checked_profile = validate_cookie_header(header)
+    if not valid:
+        raise RuntimeError(message)
+    account = (checked_profile or profile or {}).get("name") or (checked_profile or profile or {}).get("url_token") or ""
+    _set_auth_state(
+        status="ready",
+        message=f"{message}，来源：内置登录窗口",
+        browser="内置登录窗口",
+        account_name=account,
+    )
+    add_log("✓ 登录态已保存，后续可直接抓取")
+
+
+def _verify_cookie_job():
+    header = current_cookie_header()
+    valid, message, profile = validate_cookie_header(header)
+    if not valid:
+        _set_auth_state(status="error", message=message, browser="", account_name="")
+        raise RuntimeError(message)
+    account = (profile or {}).get("name") or (profile or {}).get("url_token") or ""
+    _set_auth_state(status="ready", message=message, browser="", account_name=account)
+    add_log(f"✓ {message}")
+
+
+def _clear_cookie_job():
+    clear_cookie_header()
+    _set_auth_state(status="idle", message="已清除本地保存的 Cookie", browser="", account_name="")
+    add_log("✓ 已清除本地 .env 中保存的知乎 Cookie")
 
 def _snapshot_task_state():
     with _task_state_lock:
@@ -625,7 +759,7 @@ def _load_local_env():
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
                     k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
+                    os.environ[k.strip()] = v.strip()
 
 
 def _output_web_path(abs_path: str) -> str:
@@ -760,6 +894,7 @@ class GUIHandler(BaseHTTPRequestHandler):
                 "python": sys.executable[:50],
                 "queue": _queue_snapshot(),
                 "recent_html": _recent_html_files(),
+                "auth": _auth_snapshot(),
             }).encode("utf-8"))
 
         elif parsed.path == "/file":
@@ -901,6 +1036,40 @@ class GUIHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": ok, "message": message}).encode("utf-8"))
+
+        elif parsed.path == "/auth/import":
+            qs = parse_qs(parsed.query)
+            browser_key = qs.get("browser", ["chrome"])[0].strip().lower()
+            ok, message = _run_auth_job(f"正在从 {browser_key} 导入 Cookie", lambda: _import_cookie_job(browser_key))
+            if ok:
+                add_log(f"▶ 已开始从 {browser_key} 导入浏览器登录态")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": ok, "message": message or "started"}).encode("utf-8"))
+
+        elif parsed.path == "/auth/login-browser":
+            ok, message = _run_auth_job("正在打开可见浏览器登录窗口", _managed_login_job)
+            if ok:
+                add_log("▶ 已启动可见浏览器登录流程")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": ok, "message": message or "started"}).encode("utf-8"))
+
+        elif parsed.path == "/auth/verify":
+            ok, message = _run_auth_job("正在校验当前 Cookie", _verify_cookie_job)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": ok, "message": message or "started"}).encode("utf-8"))
+
+        elif parsed.path == "/auth/clear":
+            ok, message = _run_auth_job("正在清除本地 Cookie", _clear_cookie_job)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": ok, "message": message or "started"}).encode("utf-8"))
 
         else:
             self.send_error(404)
@@ -1351,6 +1520,46 @@ HTML = """<!DOCTYPE html>
     line-height: 1.7;
   }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .auth-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .auth-status-box {
+    border-radius: 18px;
+    border: 1px solid rgba(104, 212, 255, 0.12);
+    background: rgba(5, 10, 16, 0.85);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .auth-status-line {
+    font-size: 14px;
+    color: #eaf6ff;
+    line-height: 1.7;
+  }
+  .auth-status-line strong { color: #74dbff; }
+  .auth-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: #7f8a9d;
+    line-height: 1.6;
+  }
+  .auth-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .auth-browser-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
   .btn {
     border-radius: 14px;
     padding: 11px 16px;
@@ -1696,6 +1905,7 @@ HTML = """<!DOCTYPE html>
     .hero, .card { border-radius: 18px; padding: 18px; }
     .grid, .queue-meta, .quick-grid, .status-bar { grid-template-columns: 1fr; }
     .toolbar-row { align-items: stretch; }
+    .auth-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1708,6 +1918,33 @@ HTML = """<!DOCTYPE html>
 
   <div class="layout">
     <main class="stack">
+      <section class="card">
+        <div class="card-head">
+          <div class="card-title">账号与登录</div>
+        </div>
+        <div class="auth-grid">
+          <div class="auth-status-box">
+            <div class="auth-status-line" id="auth-status-line">正在检查本地知乎登录态...</div>
+            <div class="auth-meta" id="auth-meta">
+              <span>首次使用时，可以直接从已登录的 Chrome / Edge / Brave 导入 Cookie。</span>
+              <span>如果导入失败，也可以打开可见浏览器窗口手动登录，程序会自动保存。</span>
+            </div>
+            <div class="auth-actions">
+              <button type="button" class="btn btn-primary" id="btn-auth-login">打开登录窗口</button>
+              <button type="button" class="btn btn-subtle" id="btn-auth-verify">校验当前登录态</button>
+              <button type="button" class="btn btn-danger" id="btn-auth-clear">清除本地 Cookie</button>
+            </div>
+          </div>
+          <div class="field-stack">
+            <div class="field">
+              <div class="label">从本机浏览器导入</div>
+              <div class="auth-browser-list" id="auth-browser-list"></div>
+            </div>
+              <div class="hint">推荐先试 `Chrome`。登录窗口和抓取流程会优先复用系统已安装的 Chrome，其次是 Edge，不会额外打包浏览器内核。</div>
+          </div>
+        </div>
+      </section>
+
       <section class="card">
         <div class="card-head">
           <div class="card-title">发起任务</div>
@@ -1897,6 +2134,7 @@ ming--li"></textarea>
   let recentHtmlTypeFilter = 'all';
   let recentHtmlScrollTop = 0;
   let recentHtmlSignature = '';
+  let authStatus = null;
   const logArea = document.getElementById('log-area');
   const qInput = document.getElementById('q-input');
   const uInput = document.getElementById('u-input');
@@ -2000,6 +2238,63 @@ ming--li"></textarea>
 
   function selectedUserTypes() {
     return userTypeInputs.filter(node => node.checked).map(node => node.value);
+  }
+
+  function renderAuth(auth) {
+    authStatus = auth || {};
+    const statusLine = document.getElementById('auth-status-line');
+    const meta = document.getElementById('auth-meta');
+    const browserList = document.getElementById('auth-browser-list');
+    const statusTextMap = {
+      idle: '未配置',
+      ready: '可用',
+      running: '处理中',
+      error: '异常',
+    };
+    const stateText = statusTextMap[authStatus.status] || (authStatus.status || '未知');
+    const message = authStatus.message || authStatus.cookie_summary || '未配置 Cookie';
+    statusLine.innerHTML = `当前状态：<strong>${escapeHtml(stateText)}</strong> · ${escapeHtml(message)}`;
+    meta.innerHTML = `
+      <span>Cookie：${escapeHtml(authStatus.cookie_summary || '未配置')}</span>
+      <span>来源：${escapeHtml(authStatus.browser || '手动 / 未知')}</span>
+      <span>账号：${escapeHtml(authStatus.account_name || '未识别')}</span>
+      <span>更新时间：${escapeHtml(authStatus.updated_text || '-')}</span>
+    `;
+    const browsers = Array.isArray(authStatus.supported_browsers) ? authStatus.supported_browsers : [];
+    browserList.innerHTML = browsers.map(item => `
+      <button type="button" class="btn btn-subtle" data-browser="${escapeHtml(item.key)}">导入 ${escapeHtml(item.label)}</button>
+    `).join('');
+    browserList.querySelectorAll('[data-browser]').forEach((node) => {
+      node.addEventListener('click', () => importBrowserCookie(node.dataset.browser || 'chrome'));
+    });
+  }
+
+  async function runAuthAction(path) {
+    try {
+      const response = await fetch(path, { method: 'POST' });
+      const payload = await response.json();
+      if (!payload.ok) {
+        appendLog('⚠ ' + (payload.message || '账号操作未能启动'), 'warn');
+      }
+    } catch (error) {
+      appendLog('✗ 账号操作失败: ' + error.message, 'err');
+    }
+  }
+
+  async function importBrowserCookie(browser) {
+    await runAuthAction('/auth/import?browser=' + encodeURIComponent(browser));
+  }
+
+  async function openLoginBrowser() {
+    await runAuthAction('/auth/login-browser');
+  }
+
+  async function verifyCookie() {
+    await runAuthAction('/auth/verify');
+  }
+
+  async function clearCookie() {
+    await runAuthAction('/auth/clear');
   }
 
   async function enqueue(cmd, arg, mode='full', types='', profile='standard', htmlVariant='dir', postAction='none', force=false) {
@@ -2412,6 +2707,10 @@ ming--li"></textarea>
     window.toggleFollow = toggleFollow;
     window.scrollLogToBottom = scrollLogToBottom;
     window.copyLogs = copyLogs;
+    window.importBrowserCookie = importBrowserCookie;
+    window.openLoginBrowser = openLoginBrowser;
+    window.verifyCookie = verifyCookie;
+    window.clearCookie = clearCookie;
   }
 
   function wireButtons() {
@@ -2430,6 +2729,9 @@ ming--li"></textarea>
     bind('btn-follow', toggleFollow);
     bind('btn-pause', togglePause);
     bind('btn-stop', stopTask);
+    bind('btn-auth-login', openLoginBrowser);
+    bind('btn-auth-verify', verifyCookie);
+    bind('btn-auth-clear', clearCookie);
   }
 
   window.addEventListener('error', (event) => {
@@ -2452,6 +2754,7 @@ ming--li"></textarea>
       const payload = await response.json();
       updateRunningState(payload);
       renderQueue(payload.queue || []);
+      renderAuth(payload.auth || {});
       const nextRecentItems = payload.recent_html || [];
       const nextSignature = JSON.stringify(nextRecentItems.map(item => [item.path, item.modified_at, item.modified_text]));
       if (nextSignature !== recentHtmlSignature) {
@@ -2486,9 +2789,24 @@ def _find_available_port(preferred_port: int, max_tries: int = 20) -> int:
     raise OSError(f"localhost:{preferred_port}-{preferred_port + max_tries - 1} 均不可用")
 
 
+def _maybe_open_browser(url: str) -> None:
+    if os.getenv("GUI_OPEN_BROWSER", "1").strip() in {"0", "false", "False"}:
+        return
+
+    def opener():
+        time.sleep(0.6)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    threading.Thread(target=opener, daemon=True).start()
+
+
 def main():
     global _server_instance
     _load_local_env()
+    _refresh_auth_state_from_env()
     requested_port = int(os.getenv("GUI_PORT", "8080"))
     try:
         port = requested_port if "GUI_PORT" in os.environ else _find_available_port(requested_port)
@@ -2509,6 +2827,7 @@ def main():
     print(f"=" * 40)
     add_log(f"✓ GUI 已启动: http://localhost:{port}")
     add_log(f"✓ 日志文件: {_ensure_log_file()}")
+    _maybe_open_browser(f"http://localhost:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

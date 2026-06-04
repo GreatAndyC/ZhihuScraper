@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 知乎 Cookie（可选，不提供则使用公开接口）
 COOKIE = os.getenv("ZHIHU_COOKIE", "")
@@ -36,4 +37,4 @@ REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30"))
 QUESTION_BATCH_SIZE = int(os.getenv("QUESTION_BATCH_SIZE", "50"))
 
 # 输出目录
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")

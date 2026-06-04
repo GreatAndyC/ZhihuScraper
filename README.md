@@ -190,7 +190,7 @@ graph TD
 建议环境：
 - Python 3.11+
 - macOS / Linux / Windows
-- 可正常安装 Playwright Chromium
+- macOS 轻量版应用建议本机已安装 Google Chrome 或 Microsoft Edge
 
 ### 2. 安装依赖
 
@@ -202,9 +202,7 @@ python -m venv venv
 
 # macOS / Linux
 python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
+venv/bin/pip install -r requirements.txt
 ```
 
 也可以直接使用 Makefile（如果你安装了 Make）：
@@ -292,23 +290,35 @@ ZHIHU_COOKIE=这里粘贴完整Cookie
 .\venv\Scripts\python.exe gui.py
 ```
 
-#### macOS / Linux
+GUI 启动后会自动在默认浏览器打开页面。  
+如果 `8080` 被占用，GUI 会自动切换到下一个可用端口。  
+也可以手动指定：
+
 ```bash
 ./venv/bin/python3 gui.py
 ```
 
-> **提示**：如果 `8080` 端口被占用，程序会自动尝试下一个可用端口。
-> 启动后，控制台会输出类似 `Starting server on http://localhost:8080` 的信息，直接在浏览器打开即可。
+现在首次使用不必再手动 `F12` 抄 Cookie：
 
-如果需要手动指定端口：
+- 可以在 GUI 顶部直接点击 `导入 Chrome / Edge / Brave`
+- 也可以点击 `打开登录窗口`，在系统 `Chrome` 或 `Edge` 弹窗里手动登录知乎
+- 登录成功后会自动保存到项目根目录 `.env`
+
+### 方式一补充：打包成双击可用应用
 
 ```bash
-# Windows (PowerShell)
-$env:GUI_PORT=8081; .\venv\Scripts\python.exe gui.py
-
-# macOS / Linux
-GUI_PORT=8081 ./venv/bin/python3 gui.py
+make package
 ```
+
+打包脚本会读取 [ZhihuScraper.spec](/Users/andycao/Documents/Project/ZhihuScraper/ZhihuScraper.spec)，并在 `dist/` 目录生成 GUI 应用。
+
+说明：
+- macOS 下会生成 `ZhihuScraper.app`
+- Windows 下可生成 `ZhihuScraper.exe`
+- 打包前建议先执行 `make setup`
+- 轻量版打包不会内置 Chromium
+- 抓取和登录会优先复用系统已安装的 `Chrome`，其次 `Edge`
+- 如果系统里没有可用浏览器，GUI 会提示先安装 `Chrome` 或 `Edge`
 
 ### 方式二：CLI
 
@@ -398,6 +408,16 @@ venv/bin/python main.py user ming--li --mode full --types pin --force
 这会只重新抓 `pin`，并把旧归档里的 `answer/article` 保留下来后再合并保存。
 
 ## 🖱️ GUI 使用流程
+
+### 首次登录配置
+
+1. 启动 GUI
+2. 在顶部 `账号与登录` 区域优先尝试 `导入 Chrome`
+3. 如果导入失败，点击 `打开登录窗口`
+4. 在弹出的可见浏览器中登录知乎
+5. 登录成功后程序会自动保存 Cookie
+
+之后再次启动时会自动读取本地 `.env`，一般不需要重新配置。
 
 ### 问题抓取
 
