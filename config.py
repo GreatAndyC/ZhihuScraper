@@ -11,9 +11,17 @@ COOKIE = os.getenv("ZHIHU_COOKIE", "")
 REQUEST_DELAY_MIN = float(os.getenv("REQUEST_DELAY_MIN", "1"))
 REQUEST_DELAY_MAX = float(os.getenv("REQUEST_DELAY_MAX", "2"))
 
+# 快速模式请求间隔（更快，但更容易遇到限流或返回不完整）
+FAST_REQUEST_DELAY_MIN = float(os.getenv("FAST_REQUEST_DELAY_MIN", "0.5"))
+FAST_REQUEST_DELAY_MAX = float(os.getenv("FAST_REQUEST_DELAY_MAX", "1.0"))
+
 # 浏览器接口请求间隔（秒）
 BROWSER_DELAY_MIN = float(os.getenv("BROWSER_DELAY_MIN", "0.4"))
 BROWSER_DELAY_MAX = float(os.getenv("BROWSER_DELAY_MAX", "0.8"))
+
+# 快速模式下的浏览器接口请求间隔
+FAST_BROWSER_DELAY_MIN = float(os.getenv("FAST_BROWSER_DELAY_MIN", "0.2"))
+FAST_BROWSER_DELAY_MAX = float(os.getenv("FAST_BROWSER_DELAY_MAX", "0.4"))
 
 # 保守模式下的请求间隔（秒）
 CONSERVATIVE_REQUEST_DELAY_MIN = float(os.getenv("CONSERVATIVE_REQUEST_DELAY_MIN", "2.0"))

@@ -20,6 +20,9 @@ def test_save_question_uses_chinese_title_filename(tmp_path, monkeypatch):
     assert path.endswith(".json")
     assert "普通人要-OpenClaw-有什么用" in path
 
+    payload = json.loads(open(path, encoding="utf-8").read())
+    assert payload["export_meta"]["output_json"] == path
+
 
 def test_save_user_uses_name_filename(tmp_path, monkeypatch):
     monkeypatch.setattr("storage.OUTPUT_DIR", str(tmp_path))
@@ -29,6 +32,16 @@ def test_save_user_uses_name_filename(tmp_path, monkeypatch):
 
     assert path.endswith(".json")
     assert path.split("/")[-1] == "桑桑桑-ming--li.json"
+
+
+def test_json_storage_does_not_leave_temporary_file(tmp_path):
+    from storage import JSONStorage
+
+    path = tmp_path / "nested" / "payload.json"
+    JSONStorage().save({"answer": "完整写入"}, str(path))
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"answer": "完整写入"}
+    assert list(path.parent.glob("*.tmp")) == []
 
 
 def test_merge_question_batches_outputs_named_json(tmp_path, monkeypatch):

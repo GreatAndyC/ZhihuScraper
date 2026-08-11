@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from types import SimpleNamespace
 from typing import Type, TypeVar, Generic, Optional
 
@@ -12,9 +13,22 @@ T = TypeVar("T")
 
 class JSONStorage:
     def save(self, data: Generic, filepath: str) -> None:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        directory = os.path.dirname(os.path.abspath(filepath))
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(filepath)}.",
+            suffix=".tmp",
+            dir=directory,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, filepath)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
     def load(self, filepath: str, cls: Type[T]) -> T:
         with open(filepath, encoding="utf-8") as f:
@@ -26,6 +40,10 @@ def save_question(question, question_id: str) -> str:
     os.makedirs(os.path.join(OUTPUT_DIR, "questions"), exist_ok=True)
     stem = question_export_stem(question)
     path = os.path.join(OUTPUT_DIR, "questions", f"{stem}.json")
+    question.export_meta = {
+        **(question.export_meta or {}),
+        "output_json": path,
+    }
     storage.save(question.model_dump(), path)
     return path
 
@@ -35,6 +53,10 @@ def save_user(user, user_id: str) -> str:
     os.makedirs(os.path.join(OUTPUT_DIR, "users"), exist_ok=True)
     stem = user_export_stem(user)
     path = os.path.join(OUTPUT_DIR, "users", f"{stem}.json")
+    user.export_meta = {
+        **(user.export_meta or {}),
+        "output_json": path,
+    }
     storage.save(user.model_dump(), path)
     return path
 
@@ -154,6 +176,10 @@ def merge_question_batches(question_id: str) -> Optional[str]:
     os.makedirs(os.path.join(OUTPUT_DIR, "questions"), exist_ok=True)
     stem = question_export_stem(SimpleNamespace(**merged))
     path = os.path.join(OUTPUT_DIR, "questions", f"{stem}.json")
+    merged["export_meta"] = {
+        **(merged.get("export_meta") or {}),
+        "output_json": path,
+    }
     storage.save(merged, path)
     return path
 

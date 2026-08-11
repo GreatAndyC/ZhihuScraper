@@ -1,3 +1,5 @@
+import os
+import stat
 from types import SimpleNamespace
 
 from cookie_manager import (
@@ -27,6 +29,10 @@ def test_save_and_clear_cookie_header(tmp_path):
     save_cookie_header("z_c0=abc; d_c0=def", env_path=str(env_path))
     content = env_path.read_text(encoding="utf-8")
     assert "ZHIHU_COOKIE=z_c0=abc; d_c0=def" in content
+    if os.name != "nt":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
     clear_cookie_header(env_path=str(env_path))
     assert "ZHIHU_COOKIE=" not in env_path.read_text(encoding="utf-8")
+    if os.name != "nt":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600

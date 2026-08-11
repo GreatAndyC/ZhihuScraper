@@ -1,4 +1,5 @@
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Iterable
@@ -16,7 +17,28 @@ _ENV_LOCK = threading.Lock()
 
 
 def _ensure_parent(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+
+def _atomic_write_private_text(path: str, content: str) -> None:
+    """Atomically write a credential-bearing file with owner-only permissions."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        os.chmod(temporary_path, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def normalize_cookie_header(cookie_header: str) -> str:
@@ -76,8 +98,7 @@ def save_cookie_header(cookie_header: str, env_path: str = ENV_PATH) -> str:
                         lines.append(line)
         if not found:
             lines.append(f"{COOKIE_KEY}={normalized}")
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines).rstrip() + "\n")
+        _atomic_write_private_text(env_path, "\n".join(lines).rstrip() + "\n")
     os.environ[COOKIE_KEY] = normalized
     return env_path
 
@@ -92,9 +113,7 @@ def clear_cookie_header(env_path: str = ENV_PATH) -> str:
                     line = raw.rstrip("\n")
                     if not line.startswith(f"{COOKIE_KEY}="):
                         lines.append(line)
-        with open(env_path, "w", encoding="utf-8") as f:
-            if lines:
-                f.write("\n".join(lines).rstrip() + "\n")
+        _atomic_write_private_text(env_path, "\n".join(lines).rstrip() + "\n")
     os.environ.pop(COOKIE_KEY, None)
     return env_path
 

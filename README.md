@@ -82,6 +82,8 @@ venv/bin/python gui.py
 - 会话过期时重新登录，不要尝试绕过平台验证；
 - 怀疑泄露时，立即在知乎退出相关会话并修改账号安全设置。
 
+GUI 保存 Cookie 时会使用原子写入，并将 `.env` 文件权限收紧为仅当前用户可读写。若是手工创建或复制已有 `.env`，建议在 macOS/Linux 上执行 `chmod 600 .env`。
+
 ## 内容模式
 
 | 模式 | 适合场景 | 特点 |
@@ -106,9 +108,12 @@ make help
 venv/bin/python main.py question "https://www.zhihu.com/question/QUESTION_ID"
 venv/bin/python main.py user USER_TOKEN --mode text
 venv/bin/python main.py question QUESTION_ID --conservative
+venv/bin/python main.py question QUESTION_ID --profile fast
 venv/bin/python main.py hot-list --limit 20
 venv/bin/python main.py recommend --page 0 --per-page 10
 ```
+
+`--profile fast` 会使用更短的请求间隔，速度更快但更容易遇到限流或返回不完整；需要稳定性时建议使用默认标准模式或 `--conservative`。
 
 参数可能随版本调整，脚本或自动化任务应以 `venv/bin/python main.py --help` 的当前输出为准。
 

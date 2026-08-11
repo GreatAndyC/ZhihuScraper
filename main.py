@@ -17,6 +17,7 @@ from storage import (
     merge_user_by_content_types,
     merge_question_batches,
     prepare_question_batch_dir,
+    JSONStorage,
     save_question,
     save_question_batch,
     save_user,
@@ -63,7 +64,10 @@ def cmd_question(args):
                 if html_path:
                     print(f"浏览页: {html_path}")
                 return
-    scraper = QuestionScraper(conservative_mode=profile == "conservative")
+    scraper = QuestionScraper(
+        conservative_mode=profile == "conservative",
+        fast_mode=profile == "fast",
+    )
     batch_dir = prepare_question_batch_dir(question_id)
     print(f"分批保存目录: {batch_dir}")
     print(f"抓取节奏: {'保守模式（更慢、更稳）' if profile == 'conservative' else ('快速模式（更快，可能不完整）' if profile == 'fast' else '标准模式')}")
@@ -90,8 +94,6 @@ def cmd_question(args):
         source_input=args.question_id,
         output_html=html_path,
     )
-    path = save_question(question, question_id)
-    question.export_meta["output_json"] = path
     path = save_question(question, question_id)
     print(f"保存至: {path}")
     print(f"浏览页: {html_path}")
@@ -144,7 +146,10 @@ def cmd_user(args):
             except Exception as exc:
                 print(f"读取本地用户归档失败，本次将按整份结果覆盖保存: {exc}")
                 existing_user = None
-    scraper = UserScraper(conservative_mode=profile == "conservative")
+    scraper = UserScraper(
+        conservative_mode=profile == "conservative",
+        fast_mode=profile == "fast",
+    )
     print(f"抓取节奏: {'保守模式（更慢、更稳）' if profile == 'conservative' else ('快速模式（更快，可能不完整）' if profile == 'fast' else '标准模式')}")
     if user_id != args.user_id:
         print(f"已识别用户 ID: {user_id}")
@@ -173,8 +178,6 @@ def cmd_user(args):
         output_html=html_path,
     )
     path = save_user(user, user_id)
-    user.export_meta["output_json"] = path
-    path = save_user(user, user_id)
     print(f"保存至: {path}")
     print(f"浏览页: {html_path}")
     print(f"用户: {user.name}")
@@ -192,10 +195,8 @@ def cmd_hot_list(args):
 
     # 保存
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    import json
     path = os.path.join(OUTPUT_DIR, "hot-list.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2, default=str)
+    JSONStorage().save(items, path)
     print(f"\n已保存至 {path}")
 
 
@@ -209,10 +210,8 @@ def cmd_recommend(args):
             print(f"  [{parsed['id']}] {parsed['title'][:50]}")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    import json
     path = os.path.join(OUTPUT_DIR, "recommend.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2, default=str)
+    JSONStorage().save(items, path)
     print(f"\n已保存至 {path}")
 
 

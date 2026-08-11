@@ -763,12 +763,23 @@ def _load_local_env():
 
 
 def _output_web_path(abs_path: str) -> str:
-    normalized_output = os.path.abspath(OUTPUT_DIR)
-    normalized_target = os.path.abspath(abs_path)
-    if normalized_target.startswith(normalized_output):
+    normalized_output = os.path.realpath(OUTPUT_DIR)
+    normalized_target = os.path.realpath(abs_path)
+    if _is_within_directory(normalized_output, normalized_target):
         relative_path = os.path.relpath(normalized_target, normalized_output).replace(os.sep, "/")
         return f"/output/{relative_path}"
     return f"/file?path={normalized_target}"
+
+
+def _is_within_directory(directory: str, target: str) -> bool:
+    """Return whether target is inside directory, including the directory itself."""
+    try:
+        normalized_directory = os.path.realpath(directory)
+        normalized_target = os.path.realpath(target)
+        return os.path.commonpath([normalized_directory, normalized_target]) == normalized_directory
+    except ValueError:
+        # Different drives on Windows cannot share a common path.
+        return False
 
 
 def _recent_html_files(limit: int = 10) -> list[dict]:
@@ -807,9 +818,9 @@ def _safe_asset_key(name: str) -> str:
 
 
 def _delete_recent_html_bundle(abs_path: str) -> tuple[bool, str]:
-    html_root = os.path.abspath(os.path.join(OUTPUT_DIR, "html"))
-    target = os.path.abspath(abs_path or "")
-    if not target.startswith(html_root) or not os.path.isfile(target):
+    html_root = os.path.realpath(os.path.join(OUTPUT_DIR, "html"))
+    target = os.path.realpath(abs_path or "")
+    if not _is_within_directory(html_root, target) or not os.path.isfile(target):
         return False, "未找到可删除的本地 HTML 文件"
 
     relative = os.path.relpath(target, html_root).replace(os.sep, "/")
@@ -900,9 +911,9 @@ class GUIHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/file":
             qs = parse_qs(parsed.query)
             target = unquote(qs.get("path", [""])[0])
-            normalized_output = os.path.abspath(OUTPUT_DIR)
-            normalized_target = os.path.abspath(target) if target else ""
-            if not normalized_target.startswith(normalized_output) or not os.path.isfile(normalized_target):
+            normalized_output = os.path.realpath(OUTPUT_DIR)
+            normalized_target = os.path.realpath(target) if target else ""
+            if not _is_within_directory(normalized_output, normalized_target) or not os.path.isfile(normalized_target):
                 self.send_error(404)
                 return
             content_type, _ = mimetypes.guess_type(normalized_target)
@@ -913,10 +924,10 @@ class GUIHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f.read())
 
         elif parsed.path.startswith("/output/"):
-            normalized_output = os.path.abspath(OUTPUT_DIR)
+            normalized_output = os.path.realpath(OUTPUT_DIR)
             relative_path = unquote(parsed.path.removeprefix("/output/"))
-            normalized_target = os.path.abspath(os.path.join(normalized_output, relative_path))
-            if not normalized_target.startswith(normalized_output) or not os.path.isfile(normalized_target):
+            normalized_target = os.path.realpath(os.path.join(normalized_output, relative_path))
+            if not _is_within_directory(normalized_output, normalized_target) or not os.path.isfile(normalized_target):
                 self.send_error(404)
                 return
             content_type, _ = mimetypes.guess_type(normalized_target)
@@ -1144,7 +1155,10 @@ def _scrape_question(
 
     scraper = None
     try:
-        scraper = QuestionScraper(conservative_mode=conservative_mode)
+        scraper = QuestionScraper(
+            conservative_mode=conservative_mode,
+            fast_mode=profile == "fast",
+        )
         add_log("✓ 已连接，开始获取问题数据...")
         batch_dir = prepare_question_batch_dir(question_id)
         add_log(f"✓ 分批保存目录: {batch_dir}")
@@ -1180,8 +1194,6 @@ def _scrape_question(
             source_input=source_input,
             output_html=html_path,
         )
-        path = save_question(q, question_id)
-        q.export_meta["output_json"] = path
         path = save_question(q, question_id)
         add_log(f"✓ 已保存至: {path}")
         add_log(f"✓ 浏览页: {_output_web_path(html_path)}")
@@ -1287,7 +1299,10 @@ def _scrape_user(
 
     scraper = None
     try:
-        scraper = UserScraper(conservative_mode=conservative_mode)
+        scraper = UserScraper(
+            conservative_mode=conservative_mode,
+            fast_mode=profile == "fast",
+        )
         add_log("✓ 已连接，开始获取用户数据...")
 
         u = scraper.fetch_all(
@@ -1329,8 +1344,6 @@ def _scrape_user(
             output_html=html_path,
         )
         path = save_user(u, user_id)
-        u.export_meta["output_json"] = path
-        path = save_user(u, user_id)
         add_log(f"✓ 已保存至: {path}")
         add_log(f"✓ 浏览页: {_output_web_path(html_path)}")
         add_log(f"✓ 浏览页文件: {html_path}")
@@ -1354,21 +1367,20 @@ def _scrape_user(
 
 def _scrape_feed(cmd: str) -> tuple[bool, bool, str]:
     from scraper import FeedScraper
+    from storage import JSONStorage
 
     try:
         add_log("✓ 正在连接知乎...")
         scraper = FeedScraper()
         if cmd == "hot-list":
             items = scraper.fetch_hot_list(limit=30)
-            path = "output/hot-list.json"
+            path = os.path.join(OUTPUT_DIR, "hot-list.json")
         else:
             items = scraper.fetch_recommend(page=0, per_page=20)
-            path = "output/recommend.json"
+            path = os.path.join(OUTPUT_DIR, "recommend.json")
         add_log(f"✓ 获取成功，共 {len(items)} 条")
-        os.makedirs("output", exist_ok=True)
-        import json as j2
-        with open(path, "w", encoding="utf-8") as f:
-            j2.dump(items, f, ensure_ascii=False, indent=2, default=str)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        JSONStorage().save(items, path)
         add_log(f"✓ 已保存至: {path}")
         add_log("✓ 完成！")
         return True, False, ""

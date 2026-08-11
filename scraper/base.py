@@ -16,6 +16,10 @@ from config import (
     CONSERVATIVE_REQUEST_DELAY_MAX,
     CONSERVATIVE_REQUEST_DELAY_MIN,
     COOKIE,
+    FAST_BROWSER_DELAY_MAX,
+    FAST_BROWSER_DELAY_MIN,
+    FAST_REQUEST_DELAY_MAX,
+    FAST_REQUEST_DELAY_MIN,
     MAX_RETRIES,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -33,9 +37,16 @@ USER_AGENTS = [
 
 
 class BaseScraper:
-    def __init__(self, cookie: Optional[str] = None, conservative_mode: bool = False):
+    def __init__(
+        self,
+        cookie: Optional[str] = None,
+        conservative_mode: bool = False,
+        fast_mode: bool = False,
+    ):
         self.cookie = cookie if cookie is not None else os.getenv("ZHIHU_COOKIE", "") or COOKIE
         self.conservative_mode = conservative_mode
+        # 保守模式优先，避免调用方误传两个互斥策略时意外加速请求。
+        self.fast_mode = bool(fast_mode) and not self.conservative_mode
         self.session = self._create_session()
         self._playwright_browser = None
 
@@ -151,6 +162,8 @@ class BaseScraper:
     def _delay(self):
         if self.conservative_mode:
             delay = random.uniform(CONSERVATIVE_REQUEST_DELAY_MIN, CONSERVATIVE_REQUEST_DELAY_MAX)
+        elif self.fast_mode:
+            delay = random.uniform(FAST_REQUEST_DELAY_MIN, FAST_REQUEST_DELAY_MAX)
         else:
             delay = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
         time.sleep(delay)
@@ -158,6 +171,8 @@ class BaseScraper:
     def _browser_delay(self):
         if self.conservative_mode:
             delay = random.uniform(CONSERVATIVE_BROWSER_DELAY_MIN, CONSERVATIVE_BROWSER_DELAY_MAX)
+        elif self.fast_mode:
+            delay = random.uniform(FAST_BROWSER_DELAY_MIN, FAST_BROWSER_DELAY_MAX)
         else:
             delay = random.uniform(BROWSER_DELAY_MIN, BROWSER_DELAY_MAX)
         time.sleep(delay)
